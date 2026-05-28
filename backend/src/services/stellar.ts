@@ -157,7 +157,7 @@ export async function readEpochData(
   let raw: any;
   try {
     raw = await simulateRead<any>(contractId, "get_epoch_data", [epochArg]);
-  } catch (err: any) {
+  } catch (_err: any) {
     return { yieldAmount: 0n, totalShares: 0n, timestamp: 0n };
   }
 
