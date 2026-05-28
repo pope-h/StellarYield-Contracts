@@ -53,6 +53,16 @@ const envSchema = z.object({
   ALLOWED_ORIGINS: z
     .string()
     .default(""),
+  RATE_LIMIT_PUBLIC: z
+    .string()
+    .default("60")
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().min(1)),
+  RATE_LIMIT_AUTH: z
+    .string()
+    .default("300")
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().min(1)),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -96,4 +106,9 @@ export const config = {
 
   webhookSecret: parsed.data.WEBHOOK_SECRET,
   logLevel: parsed.data.LOG_LEVEL,
+
+  rateLimit: {
+    public: parsed.data.RATE_LIMIT_PUBLIC,
+    auth: parsed.data.RATE_LIMIT_AUTH,
+  },
 } as const;
