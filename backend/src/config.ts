@@ -39,6 +39,11 @@ const envSchema = z.object({
     .default("5000")
     .transform((v) => parseInt(v, 10))
     .pipe(z.number().int().min(100)),
+  INDEXER_BATCH_SIZE: z
+    .string()
+    .default("200")
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().min(1)),
   WEBHOOK_SECRET: z
     .string()
     .default(""),
@@ -79,6 +84,7 @@ export const config = {
   indexer: {
     startLedger: parsed.data.INDEXER_START_LEDGER,
     pollIntervalMs: parsed.data.INDEXER_POLL_INTERVAL_MS,
+    batchSize: parsed.data.INDEXER_BATCH_SIZE,
   },
 
   allowedOrigins: (() => {

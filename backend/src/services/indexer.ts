@@ -1,12 +1,214 @@
 import { xdr, scValToNative } from "@stellar/stellar-sdk";
+import { config } from "../config.js";
+import { logger } from "../logger.js";
+import { query } from "../db/index.js";
+import { getSorobanRpc } from "./stellar.js";
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withBackoff<T>(
+  fn: () => Promise<T>,
+  retries = 5,
+  startDelayMs = 1000,
+): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      const is429 =
+        err?.response?.status === 429 ||
+        err?.status === 429 ||
+        String(err?.message ?? "").includes("429");
+      if (!is429 || attempt >= retries) throw err;
+      const delayMs = Math.min(startDelayMs * Math.pow(2, attempt), 60_000);
+      logger.warn(
+        { attempt: attempt + 1, delayMs },
+        "RPC 429 rate-limit; retrying with backoff",
+      );
+      await wait(delayMs);
+      attempt++;
+    }
+  }
+}
 
 export class Indexer {
+  lastLedger: number;
+  private running = false;
+
+  constructor() {
+    this.lastLedger = config.indexer.startLedger;
+  }
+
   async start(): Promise<void> {
-    throw new Error("Not implemented");
+    this.running = true;
+
+    const rows = await query<{ last_ledger: number }>(
+      "SELECT last_ledger FROM indexer_state ORDER BY id DESC LIMIT 1",
+    );
+    if (rows.length > 0) {
+      this.lastLedger = rows[0].last_ledger;
+    }
+
+    const server = getSorobanRpc();
+    const { sequence: tipLedger } = await server.getLatestLedger();
+    const gap = tipLedger - this.lastLedger;
+
+    if (gap > config.indexer.batchSize) {
+      await this.backfill(tipLedger);
+    }
+
+    while (this.running) {
+      await this.tick();
+      await wait(config.indexer.pollIntervalMs);
+    }
   }
 
   stop(): void {
-    throw new Error("Not implemented");
+    this.running = false;
+  }
+
+  async tick(): Promise<void> {
+    const server = getSorobanRpc();
+
+    let latestLedger: number;
+    try {
+      const resp = await withBackoff(() => server.getLatestLedger());
+      latestLedger = resp.sequence;
+    } catch (err) {
+      logger.warn({ err }, "RPC error fetching latest ledger during tick");
+      return;
+    }
+
+    if (latestLedger <= this.lastLedger) return;
+
+    const from = this.lastLedger + 1;
+
+    let events: any[];
+    try {
+      const resp = await withBackoff(() =>
+        server.getEvents({ startLedger: from, filters: [] }),
+      );
+      events = resp.events;
+    } catch (err) {
+      logger.warn({ err, from, to: latestLedger }, "RPC error fetching events during tick");
+      return;
+    }
+
+    logger.info(
+      { from, to: latestLedger, eventCount: events.length },
+      "Indexer tick complete",
+    );
+
+    for (const event of events) {
+      logger.debug(
+        { contractId: event.contractId, type: event.type, ledger: event.ledger },
+        "Processing event",
+      );
+      await this.processEvent(event);
+    }
+
+    this.lastLedger = latestLedger;
+    await this.persistLastLedger();
+  }
+
+  private async backfill(tipLedger: number): Promise<void> {
+    const batchSize = config.indexer.batchSize;
+    const server = getSorobanRpc();
+    let cursor = this.lastLedger;
+
+    while (cursor < tipLedger) {
+      const batchTo = Math.min(cursor + batchSize, tipLedger);
+      const remaining = tipLedger - batchTo;
+
+      logger.info(
+        { from: cursor + 1, to: batchTo, remaining },
+        `Backfilling ledgers ${cursor + 1}–${batchTo} (${remaining} remaining)`,
+      );
+
+      try {
+        const resp = await withBackoff(() =>
+          server.getEvents({ startLedger: cursor + 1, filters: [] }),
+        );
+
+        for (const event of resp.events) {
+          logger.debug(
+            { contractId: event.contractId, type: event.type, ledger: event.ledger },
+            "Backfill event",
+          );
+          await this.processEvent(event);
+        }
+
+        cursor = batchTo;
+        this.lastLedger = cursor;
+        await this.persistLastLedger();
+      } catch (err) {
+        logger.warn({ err, from: cursor + 1, to: batchTo }, "RPC error during backfill batch");
+        break;
+      }
+    }
+  }
+
+  private async processEvent(event: any): Promise<void> {
+    const existing = await query(
+      "SELECT id FROM indexed_events WHERE tx_hash = $1 AND contract_id = $2 AND event_type = $3 AND ledger = $4",
+      [event.id ?? event.txHash ?? "", event.contractId ?? "", event.type ?? "", event.ledger ?? 0],
+    );
+    if (existing.length > 0) return;
+
+    const deposit = parseDepositEvent(event);
+    if (deposit) {
+      await this.handleDeposit(event.contractId ?? "", deposit);
+      await this.recordEvent(event, "deposit");
+      return;
+    }
+
+    const yieldDist = parseYieldDistributedEvent(event);
+    if (yieldDist) {
+      await this.recordEvent(event, "yield_distributed");
+    }
+  }
+
+  private async handleDeposit(
+    contractId: string,
+    deposit: { caller: string; receiver: string; assets: bigint; shares: bigint },
+  ): Promise<void> {
+    await query(
+      `INSERT INTO user_vault_positions (user_address, vault_id, shares, deposited, updated_at)
+       SELECT $1, v.id, $2, $3, NOW()
+       FROM vaults v WHERE v.contract_id = $4
+       ON CONFLICT (user_address, vault_id)
+       DO UPDATE SET
+         shares    = user_vault_positions.shares    + EXCLUDED.shares,
+         deposited = user_vault_positions.deposited + EXCLUDED.deposited,
+         updated_at = NOW()`,
+      [deposit.receiver, deposit.shares.toString(), deposit.assets.toString(), contractId],
+    );
+  }
+
+  private async recordEvent(event: any, eventType: string): Promise<void> {
+    await query(
+      `INSERT INTO indexed_events (ledger, tx_hash, contract_id, event_type, payload)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT DO NOTHING`,
+      [
+        event.ledger ?? 0,
+        event.id ?? event.txHash ?? "",
+        event.contractId ?? "",
+        eventType,
+        JSON.stringify(event),
+      ],
+    );
+  }
+
+  private async persistLastLedger(): Promise<void> {
+    await query(
+      `INSERT INTO indexer_state (last_ledger, updated_at) VALUES ($1, NOW())
+       ON CONFLICT (id) DO UPDATE SET last_ledger = $1, updated_at = NOW()`,
+      [this.lastLedger],
+    );
   }
 }
 
@@ -25,7 +227,7 @@ export function parseDepositEvent(rawEvent: any): {
     const parsedTopics = topics.map((t: any) =>
       typeof t === "string" ? xdr.ScVal.fromXDR(t, "base64") : t
     );
-    const parsedValue = typeof value === "string" 
+    const parsedValue = typeof value === "string"
       ? xdr.ScVal.fromXDR(value, "base64")
       : value;
 
@@ -65,7 +267,7 @@ export function parseYieldDistributedEvent(rawEvent: any): {
     const parsedTopics = topics.map((t: any) =>
       typeof t === "string" ? xdr.ScVal.fromXDR(t, "base64") : t
     );
-    const parsedValue = typeof value === "string" 
+    const parsedValue = typeof value === "string"
       ? xdr.ScVal.fromXDR(value, "base64")
       : value;
 
