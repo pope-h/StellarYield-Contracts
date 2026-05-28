@@ -4,6 +4,7 @@ import { logger } from "../logger.js";
 import { query } from "../db/index.js";
 import { getSorobanRpc } from "./stellar.js";
 import { VaultService } from "./vault.js";
+import { NotificationService } from "./notifications.js";
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -54,13 +55,16 @@ async function withBackoff<T>(
 export class Indexer {
   lastLedger: number;
   private running = false;
+  private lastTickAt: Date | null = null;
   private readonly vaultFactoryContractId: string;
   private vaultService: VaultService;
+  private notificationService?: NotificationService;
 
-  constructor() {
+  constructor(notificationService?: NotificationService) {
     this.lastLedger = config.indexer.startLedger;
     this.vaultFactoryContractId = config.stellar.vaultFactoryContractId;
     this.vaultService = new VaultService();
+    this.notificationService = notificationService;
 
     // Validate contract ID at startup (#449)
     if (!this.vaultFactoryContractId) {
@@ -132,6 +136,7 @@ export class Indexer {
         { latestLedger, lastLedger: this.lastLedger },
         "no events",
       );
+      this.lastTickAt = new Date();
       return;
     }
 
@@ -142,6 +147,7 @@ export class Indexer {
       { ledger: latestLedger },
       "no events",
     );
+    this.lastTickAt = new Date();
   }
 
   async tick(): Promise<void> {
@@ -191,6 +197,7 @@ export class Indexer {
 
     this.lastLedger = latestLedger;
     await this.persistLastLedger();
+    this.lastTickAt = new Date();
   }
 
   private async backfill(tipLedger: number): Promise<void> {
@@ -228,6 +235,7 @@ export class Indexer {
         cursor = batchTo;
         this.lastLedger = cursor;
         await this.persistLastLedger();
+        this.lastTickAt = new Date();
       } catch (err) {
         logger.warn({ err, from: cursor + 1, to: batchTo }, "RPC error during backfill batch");
         break;
@@ -246,18 +254,33 @@ export class Indexer {
     if (deposit) {
       await this.handleDeposit(event.contractId ?? "", deposit);
       await this.recordEvent(event, "deposit");
+      try {
+        await this.notificationService?.notify("deposit", deposit as any);
+      } catch (e) {
+        logger.warn({ err: e }, "NotificationService.notify failed for deposit");
+      }
       return;
     }
 
     const yieldDist = parseYieldDistributedEvent(event);
     if (yieldDist) {
       await this.recordEvent(event, "yield_distributed");
+      try {
+        await this.notificationService?.notify("yield_distributed", yieldDist as any);
+      } catch (e) {
+        logger.warn({ err: e }, "NotificationService.notify failed for yield_distributed");
+      }
       return;
     }
 
     const vaultStateChanged = parseVaultStateChangedEvent(event);
     if (vaultStateChanged) {
       await this.recordEvent(event, "vault_state_changed");
+      try {
+        await this.notificationService?.notify("vault_state_changed", vaultStateChanged as any);
+      } catch (e) {
+        logger.warn({ err: e }, "NotificationService.notify failed for vault_state_changed");
+      }
       return;
     }
 
@@ -265,8 +288,26 @@ export class Indexer {
     if (vaultCreated) {
       await this.handleVaultCreated(event.contractId ?? "", vaultCreated);
       await this.recordEvent(event, "vault_created");
+      try {
+        await this.notificationService?.notify("vault_created", vaultCreated as any);
+      } catch (e) {
+        logger.warn({ err: e }, "NotificationService.notify failed for vault_created");
+      }
       return;
     }
+  }
+
+  isRunning(): boolean {
+    return this.running;
+  }
+
+  getLastTickAt(): Date | null {
+    return this.lastTickAt;
+  }
+
+  async getEventsIndexedCount(): Promise<number> {
+    const rows = await query<{ count: string }>("SELECT COUNT(*)::text as count FROM indexed_events");
+    return parseInt(rows[0]?.count ?? "0", 10);
   }
 
   private async handleDeposit(

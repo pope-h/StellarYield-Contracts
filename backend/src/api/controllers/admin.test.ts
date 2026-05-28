@@ -12,11 +12,17 @@ describe("Admin Controller", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
-
   describe("getAdminStats", () => {
-    it("returns total user count", async () => {
+    it("returns vault/user/epoch counts and TVL", async () => {
       const { query, getAdminStats } = await getTestContext();
-      query.mockResolvedValue([{ count: "42" }]);
+      // vaultCount
+      query.mockResolvedValueOnce([{ count: "2" }]);
+      // userCount
+      query.mockResolvedValueOnce([{ count: "42" }]);
+      // totalValueLocked
+      query.mockResolvedValueOnce([{ total: "12345" }]);
+      // epochCount
+      query.mockResolvedValueOnce([{ count: "3" }]);
 
       const req = {} as any;
       const res = { json: vi.fn() } as any;
@@ -24,20 +30,7 @@ describe("Admin Controller", () => {
 
       await getAdminStats(req, res, next);
 
-      expect(res.json).toHaveBeenCalledWith({ totalUsers: 42 });
-    });
-
-    it("returns 0 when no users", async () => {
-      const { query, getAdminStats } = await getTestContext();
-      query.mockResolvedValue([{ count: "0" }]);
-
-      const req = {} as any;
-      const res = { json: vi.fn() } as any;
-      const next = vi.fn();
-
-      await getAdminStats(req, res, next);
-
-      expect(res.json).toHaveBeenCalledWith({ totalUsers: 0 });
+      expect(res.json).toHaveBeenCalledWith({ vaultCount: 2, userCount: 42, totalValueLocked: "12345", epochCount: 3 });
     });
   });
 });
