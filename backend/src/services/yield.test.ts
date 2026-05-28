@@ -56,4 +56,81 @@ describe("YieldService", () => {
       expect(epochs).toEqual([]);
     });
   });
+
+  describe("getUserPendingYield", () => {
+    it("returns zero pendingYield when user has no shares", async () => {
+      const { query, service } = await getTestContext();
+      query
+        .mockResolvedValueOnce([]) // no position row
+        .mockResolvedValueOnce([
+          { epoch: 1, yield_amount: "1000", total_shares: "50000" },
+        ]);
+
+      const result = await service.getUserPendingYield("CC_VAULT", "GUSER");
+      expect(result.pendingYield).toBe("0");
+      expect(result.epochs).toEqual([1]);
+      expect(result.claimedEpochs).toEqual([]);
+    });
+
+    it("returns correct pendingYield for one epoch", async () => {
+      const { query, service } = await getTestContext();
+      query
+        .mockResolvedValueOnce([{ shares: "1000", last_claimed_epoch: -1 }])
+        .mockResolvedValueOnce([
+          { epoch: 1, yield_amount: "500", total_shares: "5000" },
+        ]);
+
+      const result = await service.getUserPendingYield("CC_VAULT", "GUSER");
+      // 1000 * 500 / 5000 = 100
+      expect(result.pendingYield).toBe("100");
+      expect(result.epochs).toEqual([1]);
+      expect(result.claimedEpochs).toEqual([]);
+    });
+
+    it("returns summed pendingYield across multiple epochs", async () => {
+      const { query, service } = await getTestContext();
+      query
+        .mockResolvedValueOnce([{ shares: "1000", last_claimed_epoch: -1 }])
+        .mockResolvedValueOnce([
+          { epoch: 1, yield_amount: "500", total_shares: "5000" },
+          { epoch: 2, yield_amount: "1000", total_shares: "5000" },
+        ]);
+
+      const result = await service.getUserPendingYield("CC_VAULT", "GUSER");
+      // epoch1: 1000*500/5000=100, epoch2: 1000*1000/5000=200, total=300
+      expect(result.pendingYield).toBe("300");
+      expect(result.epochs).toEqual([1, 2]);
+      expect(result.claimedEpochs).toEqual([]);
+    });
+
+    it("excludes already-claimed epochs from pendingYield", async () => {
+      const { query, service } = await getTestContext();
+      query
+        .mockResolvedValueOnce([{ shares: "1000", last_claimed_epoch: 1 }])
+        .mockResolvedValueOnce([
+          { epoch: 1, yield_amount: "500", total_shares: "5000" },
+          { epoch: 2, yield_amount: "1000", total_shares: "5000" },
+        ]);
+
+      const result = await service.getUserPendingYield("CC_VAULT", "GUSER");
+      // epoch 1 is claimed, only epoch 2 counts: 1000*1000/5000=200
+      expect(result.pendingYield).toBe("200");
+      expect(result.epochs).toEqual([2]);
+      expect(result.claimedEpochs).toEqual([1]);
+    });
+  });
+
+  describe("recordEpoch", () => {
+    it("calls query with INSERT INTO epochs and correct params", async () => {
+      const { query, service } = await getTestContext();
+      query.mockResolvedValue([]);
+
+      await service.recordEpoch(10, 1, "1000", "50000");
+
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining("INSERT INTO epochs"),
+        [10, 1, "1000", "50000"],
+      );
+    });
+  });
 });

@@ -88,13 +88,20 @@ export class YieldService {
     totalEpochs: string;
     totalYieldDistributed: string;
     averageYieldPerEpoch: string;
+    estimatedApy: number;
   }> {
     const rows = await query<{
       total_epochs: string;
       total_yield: string;
+      first_epoch_at: Date | null;
+      last_epoch_at: Date | null;
+      total_assets: string | null;
     }>(
       `SELECT COUNT(e.id)::text AS total_epochs,
-              COALESCE(SUM(e.yield_amount::numeric), 0)::text AS total_yield
+              COALESCE(SUM(e.yield_amount::numeric), 0)::text AS total_yield,
+              MIN(e.distributed_at) AS first_epoch_at,
+              MAX(e.distributed_at) AS last_epoch_at,
+              MAX(v.total_assets)::text AS total_assets
        FROM epochs e
        JOIN vaults v ON e.vault_id = v.id
        WHERE v.contract_id = $1`,
@@ -105,10 +112,27 @@ export class YieldService {
     const totalYield = BigInt(rows[0]?.total_yield ?? "0");
     const average = totalEpochs > BigInt(0) ? totalYield / totalEpochs : BigInt(0);
 
+    const SECONDS_PER_YEAR = 365.25 * 24 * 60 * 60;
+    let estimatedApy = 0;
+
+    if (totalEpochs >= BigInt(2)) {
+      const firstAt = rows[0]?.first_epoch_at;
+      const lastAt = rows[0]?.last_epoch_at;
+      const totalAssetsNum = Number(rows[0]?.total_assets ?? "0");
+      if (firstAt && lastAt && totalAssetsNum > 0) {
+        const activeDurationSeconds = (lastAt.getTime() - firstAt.getTime()) / 1000;
+        if (activeDurationSeconds > 0) {
+          estimatedApy =
+            (Number(totalYield) / totalAssetsNum) * (SECONDS_PER_YEAR / activeDurationSeconds);
+        }
+      }
+    }
+
     return {
       totalEpochs: totalEpochs.toString(),
       totalYieldDistributed: totalYield.toString(),
       averageYieldPerEpoch: average.toString(),
+      estimatedApy,
     };
   }
 
