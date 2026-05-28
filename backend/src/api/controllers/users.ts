@@ -16,9 +16,15 @@ export async function getUser(req: Request, res: Response, next: NextFunction) {
   }
 }
 
-export async function getUserPortfolio(req: Request, res: Response, next: NextFunction) {
+export async function getUserPortfolio(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
   try {
-    const portfolio = await userService.getUserPortfolio(String(req.params["address"]));
+    const portfolio = await userService.getUserPortfolio(
+      String(req.params["address"]),
+    );
     res.json(portfolio);
   } catch (err) {
     next(err);
