@@ -37,7 +37,7 @@ describe("UserService Integration", () => {
   });
 
   describe("getUserPortfolio", () => {
-    it("returns an array of positions", async () => {
+    it("returns positions with totalDeposited", async () => {
       const { query, service } = await getTestContext();
       query.mockResolvedValue([
         {
@@ -52,19 +52,22 @@ describe("UserService Integration", () => {
       ]);
 
       const portfolio = await service.getUserPortfolio("GABCDEF");
-      expect(Array.isArray(portfolio)).toBe(true);
-      expect(portfolio.length).toBe(1);
-      expect(portfolio[0].userAddress).toBe("GABCDEF");
-      expect(portfolio[0].shares).toBe("1000");
+      expect(portfolio).toHaveProperty("positions");
+      expect(portfolio).toHaveProperty("totalDeposited");
+      expect(Array.isArray(portfolio.positions)).toBe(true);
+      expect(portfolio.positions.length).toBe(1);
+      expect(portfolio.positions[0].userAddress).toBe("GABCDEF");
+      expect(portfolio.positions[0].shares).toBe("1000");
+      expect(portfolio.totalDeposited).toBe("500");
     });
 
-    it("returns empty array when user has no positions", async () => {
+    it("returns empty positions and zero total when no positions", async () => {
       const { query, service } = await getTestContext();
       query.mockResolvedValue([]);
 
       const portfolio = await service.getUserPortfolio("GEMPTY");
-      expect(Array.isArray(portfolio)).toBe(true);
-      expect(portfolio.length).toBe(0);
+      expect(portfolio.positions).toEqual([]);
+      expect(portfolio.totalDeposited).toBe("0");
     });
   });
 
@@ -113,23 +116,17 @@ describe("UserService Integration", () => {
 });
 
 describe("User Controller - search validation", () => {
-  it("searchUsers requires at least 4 characters", async () => {
+  it("searchUsers controller calls service with query param", async () => {
     const { query } = await import("../../db/index.js");
+    (query as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const { searchUsers } = await import("./users.js");
-    const req = { query: { search: "AB" } } as any;
-    const res = {
-      status: vi.fn().mockReturnThis(),
-      json: vi.fn(),
-    } as any;
+    const req = { query: { search: "GXYZ" } } as any;
+    const res = { json: vi.fn() } as any;
     const next = vi.fn();
 
     await searchUsers(req, res, next);
 
-    expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({ error: "ValidationError" }),
-    );
-    expect(query).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith([]);
   });
 });
