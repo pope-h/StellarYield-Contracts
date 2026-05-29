@@ -32,6 +32,8 @@ export interface UserVaultPosition {
   id: number;
   userAddress: string;
   vaultId: number;
+  contractId?: string;
+  state?: VaultState;
   shares: string;
   deposited: string;
   lastClaimedEpoch: number;
