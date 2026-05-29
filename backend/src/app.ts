@@ -8,6 +8,7 @@ import { yieldsRouter } from "./api/routes/yields.js";
 import { adminRouter } from "./api/routes/admin.js";
 import { webhooksRouter } from "./api/routes/webhooks.js";
 import { errorHandler } from "./api/middleware/errors.js";
+import { requestId } from "./api/middleware/requestId.js";
 import { publicLimiter, authLimiter } from "./api/middleware/rateLimit.js";
 
 export function createApp(): Express {
@@ -20,6 +21,8 @@ export function createApp(): Express {
     const origin = origins.length === 1 && origins[0] === "*" ? "*" : origins;
     app.use(cors({ origin }));
   }
+
+  app.use(requestId);
 
   app.use("/health", publicLimiter, healthRouter);
   app.use("/api/v1/vaults", publicLimiter, vaultsRouter);
