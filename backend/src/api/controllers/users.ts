@@ -53,3 +53,19 @@ export async function searchUsers(req: Request, res: Response, next: NextFunctio
     next(err);
   }
 }
+
+export async function getUserYieldHistory(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const address = String(req.params["address"]);
+    const page = Number(req.query["page"] ?? 1);
+    const pageSize = Number(req.query["pageSize"] ?? 20);
+    const result = await userService.getUserYieldHistory(address, page, pageSize);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}

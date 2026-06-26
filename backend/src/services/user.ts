@@ -2,6 +2,8 @@ import type {
   User,
   UserVaultPosition,
   UserPortfolioResponse,
+  PaginatedResponse,
+  YieldHistoryEntry,
 } from "../types/index.js";
 import { query } from "../db/index.js";
 
@@ -118,5 +120,56 @@ export class UserService {
   async countUsers(): Promise<number> {
     const result = await query<{ count: string }>("SELECT COUNT(*) as count FROM users");
     return parseInt(result[0]?.count ?? "0", 10);
+  }
+
+  async getUserYieldHistory(
+    address: string,
+    page: number,
+    pageSize: number,
+  ): Promise<PaginatedResponse<YieldHistoryEntry>> {
+    const offset = (page - 1) * pageSize;
+
+    const rows = await query<{
+      contract_id: string;
+      event_type: string;
+      payload: Record<string, unknown>;
+      created_at: Date;
+    }>(
+      `SELECT contract_id, event_type, payload, created_at
+       FROM indexed_events
+       WHERE event_type IN ('yield_clm', 'prt_yld')
+         AND (payload->>'user' = $1 OR payload->>'address' = $1)
+       ORDER BY (payload->>'timestamp')::numeric DESC NULLS LAST, created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [address, pageSize, offset],
+    );
+
+    const countResult = await query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM indexed_events
+       WHERE event_type IN ('yield_clm', 'prt_yld')
+         AND (payload->>'user' = $1 OR payload->>'address' = $1)`,
+      [address],
+    );
+
+    const total = parseInt(countResult[0]?.count ?? "0", 10);
+
+    const data: YieldHistoryEntry[] = rows.map((row) => {
+      const ts = row.payload["timestamp"];
+      const timestamp = ts != null
+        ? new Date(Number(ts) * 1000).toISOString()
+        : row.created_at.toISOString();
+      const epoch = row.payload["epoch"] != null ? Number(row.payload["epoch"]) : null;
+
+      return {
+        vaultContractId: row.contract_id,
+        epoch,
+        amount: String(row.payload["amount"] ?? "0"),
+        timestamp,
+        eventType: row.event_type,
+      };
+    });
+
+    return { data, total, page, pageSize };
   }
 }

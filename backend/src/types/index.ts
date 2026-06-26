@@ -91,3 +91,11 @@ export interface PaginatedResponse<T> {
   page: number;
   pageSize: number;
 }
+
+export interface YieldHistoryEntry {
+  vaultContractId: string;
+  epoch: number | null;
+  amount: string;
+  timestamp: string;
+  eventType: string;
+}

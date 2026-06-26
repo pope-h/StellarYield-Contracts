@@ -4,6 +4,7 @@ import {
   getUser,
   getUserKyc,
   getUserPortfolio,
+  getUserYieldHistory,
   searchUsers,
 } from "../controllers/users.js";
 import {
@@ -26,12 +27,23 @@ const kycQuerySchema = z.object({
   vaultId: z.string().length(56).regex(/^C[A-Z2-7]{55}$/),
 });
 
+const yieldHistoryQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).default(20).transform((v) => Math.min(v, 50)),
+});
+
 usersRouter.get("/", validateQuery(searchQuerySchema), searchUsers);
 usersRouter.get(
   "/:address/kyc",
   validateParams(addressParamSchema),
   validateQuery(kycQuerySchema),
   getUserKyc,
+);
+usersRouter.get(
+  "/:address/yield-history",
+  validateParams(addressParamSchema),
+  validateQuery(yieldHistoryQuerySchema),
+  getUserYieldHistory,
 );
 usersRouter.get("/:address", validateParams(addressParamSchema), getUser);
 usersRouter.get(

@@ -116,6 +116,83 @@ describe("UserService Integration", () => {
   });
 });
 
+describe("UserService.getUserYieldHistory", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns paginated yield history for a user", async () => {
+    const { query, service } = await getTestContext();
+    const now = new Date();
+    query
+      .mockResolvedValueOnce([
+        {
+          contract_id: "CVAULT00000000000000000000000000000000000000000000000000",
+          event_type: "yield_clm",
+          payload: { user: "GABCDEF", epoch: 3, amount: "1000", timestamp: "1700000000" },
+          created_at: now,
+        },
+      ])
+      .mockResolvedValueOnce([{ count: "1" }]);
+
+    const result = await service.getUserYieldHistory("GABCDEF", 1, 20);
+
+    expect(result.total).toBe(1);
+    expect(result.page).toBe(1);
+    expect(result.pageSize).toBe(20);
+    expect(result.data).toHaveLength(1);
+    expect(result.data[0].vaultContractId).toBe("CVAULT00000000000000000000000000000000000000000000000000");
+    expect(result.data[0].epoch).toBe(3);
+    expect(result.data[0].amount).toBe("1000");
+    expect(result.data[0].eventType).toBe("yield_clm");
+    expect(result.data[0].timestamp).toBe(new Date(1700000000 * 1000).toISOString());
+  });
+
+  it("falls back to created_at when payload has no timestamp", async () => {
+    const { query, service } = await getTestContext();
+    const now = new Date("2024-01-01T00:00:00.000Z");
+    query
+      .mockResolvedValueOnce([
+        {
+          contract_id: "CVAULT00000000000000000000000000000000000000000000000000",
+          event_type: "prt_yld",
+          payload: { user: "GABCDEF", amount: "500" },
+          created_at: now,
+        },
+      ])
+      .mockResolvedValueOnce([{ count: "1" }]);
+
+    const result = await service.getUserYieldHistory("GABCDEF", 1, 20);
+
+    expect(result.data[0].timestamp).toBe(now.toISOString());
+    expect(result.data[0].epoch).toBeNull();
+  });
+
+  it("returns empty data when no yield events found", async () => {
+    const { query, service } = await getTestContext();
+    query
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ count: "0" }]);
+
+    const result = await service.getUserYieldHistory("GNOYIELD0000000000000000000000000000000000000000000000000", 1, 20);
+
+    expect(result.data).toEqual([]);
+    expect(result.total).toBe(0);
+  });
+
+  it("applies correct offset for page 2", async () => {
+    const { query, service } = await getTestContext();
+    query.mockResolvedValueOnce([]).mockResolvedValueOnce([{ count: "0" }]);
+
+    await service.getUserYieldHistory("GABCDEF", 2, 10);
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("OFFSET $3"),
+      ["GABCDEF", 10, 10],
+    );
+  });
+});
+
 describe("User Controller - search validation", () => {
   it("searchUsers controller calls service with query param", async () => {
     const { query } = await import("../../db/index.js");
