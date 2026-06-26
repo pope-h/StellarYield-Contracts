@@ -16,6 +16,8 @@ import {
   getEarlyRedemptionFee,
   exportVaultCsv,
   getCompoundProjection,
+  getVaultAnnualReport,
+  getEpochBreakdown,
 } from "../controllers/vaults.js";
 import { validateParams, validateQuery } from "../middleware/validate.js";
 
@@ -64,3 +66,7 @@ vaultsRouter.get(
 );
 // Export vault data as CSV: GET /api/v1/vaults/:contractId/export.csv
 vaultsRouter.get("/:contractId/export.csv", validateParams(vaultParamsSchema), exportVaultCsv);
+// Annual vault performance report: GET /api/v1/vaults/:contractId/report?year=2025
+vaultsRouter.get("/:contractId/report", validateParams(vaultParamsSchema), getVaultAnnualReport);
+// Per-user yield breakdown for a specific epoch: GET /api/v1/vaults/:contractId/epochs/:epoch/breakdown
+vaultsRouter.get("/:contractId/epochs/:epoch/breakdown", validateParams(vaultParamsSchema), getEpochBreakdown);
