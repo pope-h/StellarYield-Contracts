@@ -2,7 +2,12 @@ import { xdr, scValToNative } from "@stellar/stellar-sdk";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
 import { query } from "../db/index.js";
-import { getSorobanRpc } from "./stellar.js";
+import {
+  getSorobanRpc,
+  readRwaName,
+  readRwaSymbol,
+  readRwaDocumentUri,
+} from "./stellar.js";
 import { VaultService } from "./vault.js";
 import { NotificationService } from "./notifications.js";
 import { indexerEventsProcessedTotal, indexerLastLedger } from "./metrics.js";
@@ -114,12 +119,17 @@ export class Indexer {
   private running = false;
   private lastTickAt: Date | null = null;
   private readonly vaultFactoryContractId: string;
+  private watchedContractIds: Set<string>;
   private vaultService: VaultService;
   private notificationService?: NotificationService;
 
   constructor(notificationService?: NotificationService) {
     this.lastLedger = config.indexer.startLedger;
     this.vaultFactoryContractId = config.stellar.vaultFactoryContractId;
+    this.watchedContractIds = new Set<string>();
+    if (this.vaultFactoryContractId) {
+      this.watchedContractIds.add(this.vaultFactoryContractId);
+    }
     this.vaultService = new VaultService();
     this.notificationService = notificationService;
 
@@ -209,8 +219,9 @@ export class Indexer {
     if (latestLedger <= this.lastLedger) return;
 
     const from = this.lastLedger + 1;
-    const filters = this.vaultFactoryContractId
-      ? [{ contractIds: [this.vaultFactoryContractId] }]
+    const contractIds = Array.from(this.watchedContractIds);
+    const filters = contractIds.length > 0
+      ? contractIds.map((id) => ({ contractIds: [id] }))
       : [];
 
     let events: any[];
@@ -249,8 +260,9 @@ export class Indexer {
     const server = getSorobanRpc();
     let cursor = this.lastLedger;
 
-    const filters = this.vaultFactoryContractId
-      ? [{ contractIds: [this.vaultFactoryContractId] }]
+    const contractIds = Array.from(this.watchedContractIds);
+    const filters = contractIds.length > 0
+      ? contractIds.map((id) => ({ contractIds: [id] }))
       : [];
 
     while (cursor < tipLedger) {
@@ -378,6 +390,34 @@ export class Indexer {
       } catch (e) {
         logger.warn({ err: e }, "NotificationService.notify failed for vault_created");
       }
+      return;
+    }
+
+    const opAdded = parseOperatorAddedEvent(event);
+    if (opAdded) {
+      await this.handleOperatorAdded(event.contractId ?? "", opAdded);
+      await this.recordEvent(event, "operator_added");
+      return;
+    }
+
+    const opRemoved = parseOperatorRemovedEvent(event);
+    if (opRemoved) {
+      await this.handleOperatorRemoved(event.contractId ?? "", opRemoved);
+      await this.recordEvent(event, "operator_removed");
+      return;
+    }
+
+    const roleGranted = parseRoleGrantedEvent(event);
+    if (roleGranted) {
+      await this.handleRoleGranted(event.contractId ?? "", roleGranted);
+      await this.recordEvent(event, "role_granted");
+      return;
+    }
+
+    const roleRevoked = parseRoleRevokedEvent(event);
+    if (roleRevoked) {
+      await this.handleRoleRevoked(event.contractId ?? "", roleRevoked);
+      await this.recordEvent(event, "role_revoked");
       return;
     }
 
@@ -536,6 +576,13 @@ export class Indexer {
       { vault: vaultCreated.contractId, factoryId, name: vaultCreated.name },
       "Processing vault_created event",
     );
+
+    const [rwaName, rwaSymbol, rwaDocumentUri] = await Promise.all([
+      readRwaName(vaultCreated.contractId),
+      readRwaSymbol(vaultCreated.contractId),
+      readRwaDocumentUri(vaultCreated.contractId),
+    ]).catch(() => [null, null, null] as const);
+
     await this.vaultService.upsertVault({
       contractId: vaultCreated.contractId,
       factoryId,
@@ -547,7 +594,12 @@ export class Indexer {
       fundingDeadline: vaultCreated.fundingDeadline,
       minDeposit: vaultCreated.minDeposit,
       maxDepositPerUser: vaultCreated.maxDepositPerUser,
+      rwaName,
+      rwaSymbol,
+      rwaDocumentUri,
     });
+
+    this.watchedContractIds.add(vaultCreated.contractId);
   }
 
   private async handleCancelFunding(contractId: string): Promise<void> {
@@ -639,6 +691,121 @@ export class Indexer {
     logger.info(
       { contractId, user: event.user, requestId: event.requestId },
       "Processed early_redemption_cancelled event",
+    );
+  }
+
+  private async handleOperatorAdded(
+    contractId: string,
+    event: ParsedOperatorAddedEvent,
+  ): Promise<void> {
+    const vaultRow = await query<{ id: number }>(
+      "SELECT id FROM vaults WHERE contract_id = $1",
+      [contractId],
+    );
+    if (vaultRow.length === 0) {
+      logger.warn({ contractId }, "op_add for unknown vault — skipping");
+      return;
+    }
+    const vaultId = vaultRow[0].id;
+
+    await query(
+      `INSERT INTO vault_operators (vault_id, operator, added_by, added_at)
+       VALUES ($1, $2, $3, to_timestamp($4))
+       ON CONFLICT (vault_id, operator)
+       DO UPDATE SET
+         removed_at = NULL,
+         removed_by = NULL,
+         added_by = EXCLUDED.added_by,
+         added_at = EXCLUDED.added_at`,
+      [vaultId, event.operator, event.caller, Number(event.timestamp)],
+    );
+    logger.info(
+      { contractId, operator: event.operator },
+      "Processed operator_added event",
+    );
+  }
+
+  private async handleOperatorRemoved(
+    contractId: string,
+    event: ParsedOperatorRemovedEvent,
+  ): Promise<void> {
+    const vaultRow = await query<{ id: number }>(
+      "SELECT id FROM vaults WHERE contract_id = $1",
+      [contractId],
+    );
+    if (vaultRow.length === 0) {
+      logger.warn({ contractId }, "op_rem for unknown vault — skipping");
+      return;
+    }
+    const vaultId = vaultRow[0].id;
+
+    await query(
+      `INSERT INTO vault_operators (vault_id, operator, added_by, added_at, removed_at, removed_by)
+       VALUES ($1, $2, $3, NOW(), NOW(), $4)
+       ON CONFLICT (vault_id, operator)
+       DO UPDATE SET
+         removed_at = NOW(),
+         removed_by = EXCLUDED.removed_by`,
+      [vaultId, event.operator, event.caller, event.caller],
+    );
+    logger.info(
+      { contractId, operator: event.operator },
+      "Processed operator_removed event",
+    );
+  }
+
+  private async handleRoleGranted(
+    contractId: string,
+    event: ParsedRoleGrantedEvent,
+  ): Promise<void> {
+    const vaultRow = await query<{ id: number }>(
+      "SELECT id FROM vaults WHERE contract_id = $1",
+      [contractId],
+    );
+    if (vaultRow.length === 0) {
+      logger.warn({ contractId }, "role_grt for unknown vault — skipping");
+      return;
+    }
+    const vaultId = vaultRow[0].id;
+
+    await query(
+      `INSERT INTO vault_roles (vault_id, user_address, role, granted_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (vault_id, user_address, role)
+       DO UPDATE SET
+         revoked_at = NULL,
+         granted_at = NOW()`,
+      [vaultId, event.userAddress, event.role],
+    );
+    logger.info(
+      { contractId, user: event.userAddress, role: event.role },
+      "Processed role_granted event",
+    );
+  }
+
+  private async handleRoleRevoked(
+    contractId: string,
+    event: ParsedRoleRevokedEvent,
+  ): Promise<void> {
+    const vaultRow = await query<{ id: number }>(
+      "SELECT id FROM vaults WHERE contract_id = $1",
+      [contractId],
+    );
+    if (vaultRow.length === 0) {
+      logger.warn({ contractId }, "role_rvk for unknown vault — skipping");
+      return;
+    }
+    const vaultId = vaultRow[0].id;
+
+    await query(
+      `UPDATE vault_roles
+       SET revoked_at = NOW()
+       WHERE vault_id = $1 AND user_address = $2 AND role = $3 AND revoked_at IS NULL`,
+      [vaultId, event.userAddress, event.role],
+    );
+    logger.info(
+      { contractId, user: event.userAddress, role: event.role },
+      "Processed role_revoked event",
     );
   }
 
@@ -1281,6 +1448,179 @@ export function parseYieldClaimedPartialEvent(rawEvent: unknown): ParsedYieldCla
     const epoch = Number(arr[2] ?? 0);
 
     return { user, claimed, shortfall, epoch };
+  } catch {
+    return null;
+  }
+}
+
+// ── Issue #593: operator events ─────────────────────────────────────────────
+
+export interface ParsedOperatorAddedEvent {
+  caller: string;
+  operator: string;
+  timestamp: bigint;
+}
+
+export function parseOperatorAddedEvent(rawEvent: unknown): ParsedOperatorAddedEvent | null {
+  try {
+    if (!rawEvent || typeof rawEvent !== "object") return null;
+    const ev = rawEvent as Record<string, unknown>;
+    const topics = (ev["topic"] ?? ev["topics"]) as unknown[] | undefined;
+    const value = ev["value"] ?? ev["data"];
+
+    if (!Array.isArray(topics) || topics.length < 3 || value == null) return null;
+
+    const parsedTopics = topics.map((t) =>
+      typeof t === "string" ? xdr.ScVal.fromXDR(t, "base64") : (t as xdr.ScVal),
+    );
+    const parsedValue = typeof value === "string"
+      ? xdr.ScVal.fromXDR(value, "base64")
+      : value;
+
+    let eventName: string;
+    try {
+      eventName = String(scValToNative(parsedTopics[0]) ?? "");
+    } catch {
+      return null;
+    }
+    if (eventName !== "op_add") return null;
+
+    const caller = String(scValToNative(parsedTopics[1]) ?? "");
+    const operator = String(scValToNative(parsedTopics[2]) ?? "");
+    const timestamp = decodeBigInt(scValToNative(parsedValue as xdr.ScVal));
+
+    return { caller, operator, timestamp };
+  } catch {
+    return null;
+  }
+}
+
+export interface ParsedOperatorRemovedEvent {
+  caller: string;
+  operator: string;
+  timestamp: bigint;
+  reason: string | null;
+}
+
+export function parseOperatorRemovedEvent(rawEvent: unknown): ParsedOperatorRemovedEvent | null {
+  try {
+    if (!rawEvent || typeof rawEvent !== "object") return null;
+    const ev = rawEvent as Record<string, unknown>;
+    const topics = (ev["topic"] ?? ev["topics"]) as unknown[] | undefined;
+    const value = ev["value"] ?? ev["data"];
+
+    if (!Array.isArray(topics) || topics.length < 3 || value == null) return null;
+
+    const parsedTopics = topics.map((t) =>
+      typeof t === "string" ? xdr.ScVal.fromXDR(t, "base64") : (t as xdr.ScVal),
+    );
+    const parsedValue = typeof value === "string"
+      ? xdr.ScVal.fromXDR(value, "base64")
+      : value;
+
+    let eventName: string;
+    try {
+      eventName = String(scValToNative(parsedTopics[0]) ?? "");
+    } catch {
+      return null;
+    }
+    if (eventName !== "op_rem") return null;
+
+    const caller = String(scValToNative(parsedTopics[1]) ?? "");
+    const operator = String(scValToNative(parsedTopics[2]) ?? "");
+
+    const data = scValToNative(parsedValue as xdr.ScVal);
+    const arr = Array.isArray(data) ? data : Object.values((data as Record<string, unknown>) ?? {});
+    const timestamp = decodeBigInt(arr[0] ?? 0n);
+    const reason = arr[1] != null ? String(arr[1]) : null;
+
+    return { caller, operator, timestamp, reason };
+  } catch {
+    return null;
+  }
+}
+
+// ── Issue #594: role events ─────────────────────────────────────────────────
+
+export interface ParsedRoleGrantedEvent {
+  userAddress: string;
+  role: string;
+}
+
+export function parseRoleGrantedEvent(rawEvent: unknown): ParsedRoleGrantedEvent | null {
+  try {
+    if (!rawEvent || typeof rawEvent !== "object") return null;
+    const ev = rawEvent as Record<string, unknown>;
+    const topics = (ev["topic"] ?? ev["topics"]) as unknown[] | undefined;
+    const value = ev["value"] ?? ev["data"];
+
+    if (!Array.isArray(topics) || topics.length < 2 || value == null) return null;
+
+    const parsedTopics = topics.map((t) =>
+      typeof t === "string" ? xdr.ScVal.fromXDR(t, "base64") : (t as xdr.ScVal),
+    );
+    const parsedValue = typeof value === "string"
+      ? xdr.ScVal.fromXDR(value, "base64")
+      : value;
+
+    let eventName: string;
+    try {
+      eventName = String(scValToNative(parsedTopics[0]) ?? "");
+    } catch {
+      return null;
+    }
+    if (eventName !== "role_grt") return null;
+
+    const userAddress = String(scValToNative(parsedTopics[1]) ?? "");
+
+    const nativeRole = scValToNative(parsedValue as xdr.ScVal);
+    const role = typeof nativeRole === "string"
+      ? nativeRole
+      : String(Object.keys(nativeRole as Record<string, unknown>)[0] ?? "");
+
+    return { userAddress, role };
+  } catch {
+    return null;
+  }
+}
+
+export interface ParsedRoleRevokedEvent {
+  userAddress: string;
+  role: string;
+}
+
+export function parseRoleRevokedEvent(rawEvent: unknown): ParsedRoleRevokedEvent | null {
+  try {
+    if (!rawEvent || typeof rawEvent !== "object") return null;
+    const ev = rawEvent as Record<string, unknown>;
+    const topics = (ev["topic"] ?? ev["topics"]) as unknown[] | undefined;
+    const value = ev["value"] ?? ev["data"];
+
+    if (!Array.isArray(topics) || topics.length < 2 || value == null) return null;
+
+    const parsedTopics = topics.map((t) =>
+      typeof t === "string" ? xdr.ScVal.fromXDR(t, "base64") : (t as xdr.ScVal),
+    );
+    const parsedValue = typeof value === "string"
+      ? xdr.ScVal.fromXDR(value, "base64")
+      : value;
+
+    let eventName: string;
+    try {
+      eventName = String(scValToNative(parsedTopics[0]) ?? "");
+    } catch {
+      return null;
+    }
+    if (eventName !== "role_rvk") return null;
+
+    const userAddress = String(scValToNative(parsedTopics[1]) ?? "");
+
+    const nativeRole = scValToNative(parsedValue as xdr.ScVal);
+    const role = typeof nativeRole === "string"
+      ? nativeRole
+      : String(Object.keys(nativeRole as Record<string, unknown>)[0] ?? "");
+
+    return { userAddress, role };
   } catch {
     return null;
   }

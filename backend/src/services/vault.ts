@@ -33,6 +33,9 @@ interface VaultRow {
   funding_deadline: Date | null;
   min_deposit: string | null;
   max_deposit_per_user: string | null;
+  rwa_name: string | null;
+  rwa_symbol: string | null;
+  rwa_document_uri: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -65,6 +68,9 @@ function mapVaultRow(row: VaultRow): Vault {
     fundingProgress: computeFundingProgress(row.total_assets, row.funding_target),
     minDeposit: row.min_deposit,
     maxDepositPerUser: row.max_deposit_per_user,
+    rwaName: row.rwa_name,
+    rwaSymbol: row.rwa_symbol,
+    rwaDocumentUri: row.rwa_document_uri,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -90,6 +96,7 @@ export class VaultService {
               v.total_assets, v.total_supply, v.total_shares_ever_minted, v.total_shares_ever_burned,
               v.created_at, v.updated_at,
               v.funding_target, v.funding_deadline, v.min_deposit, v.max_deposit_per_user,
+              v.rwa_name, v.rwa_symbol, v.rwa_document_uri,
               COALESCE((
                 SELECT COUNT(*)::int
                 FROM user_vault_positions uvp
@@ -135,6 +142,7 @@ export class VaultService {
               v.total_assets, v.total_supply, v.total_shares_ever_minted, v.total_shares_ever_burned,
               v.created_at, v.updated_at,
               v.funding_target, v.funding_deadline, v.min_deposit, v.max_deposit_per_user,
+              v.rwa_name, v.rwa_symbol, v.rwa_document_uri,
               COALESCE((
                 SELECT COUNT(*)::int
                 FROM user_vault_positions uvp
@@ -155,6 +163,7 @@ export class VaultService {
               v.total_assets, v.total_supply, v.total_shares_ever_minted, v.total_shares_ever_burned,
               v.created_at, v.updated_at,
               v.funding_target, v.funding_deadline, v.min_deposit, v.max_deposit_per_user,
+              v.rwa_name, v.rwa_symbol, v.rwa_document_uri,
               COALESCE((
                 SELECT COUNT(*)::int
                 FROM user_vault_positions uvp
@@ -309,6 +318,9 @@ export class VaultService {
       fundingDeadline = null,
       minDeposit = null,
       maxDepositPerUser = null,
+      rwaName = null,
+      rwaSymbol = null,
+      rwaDocumentUri = null,
     } = vault;
 
     logger.info(
@@ -321,9 +333,10 @@ export class VaultService {
          contract_id, factory_id, asset, name, symbol, state,
          total_assets, total_supply,
          funding_target, funding_deadline, min_deposit, max_deposit_per_user,
+         rwa_name, rwa_symbol, rwa_document_uri,
          created_at, updated_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
        ON CONFLICT (contract_id)
        DO UPDATE SET
          state = EXCLUDED.state,
@@ -333,12 +346,73 @@ export class VaultService {
          funding_deadline = COALESCE(EXCLUDED.funding_deadline, vaults.funding_deadline),
          min_deposit = COALESCE(EXCLUDED.min_deposit, vaults.min_deposit),
          max_deposit_per_user = COALESCE(EXCLUDED.max_deposit_per_user, vaults.max_deposit_per_user),
+         rwa_name = COALESCE(EXCLUDED.rwa_name, vaults.rwa_name),
+         rwa_symbol = COALESCE(EXCLUDED.rwa_symbol, vaults.rwa_symbol),
+         rwa_document_uri = COALESCE(EXCLUDED.rwa_document_uri, vaults.rwa_document_uri),
          updated_at = NOW()`,
       [contractId, factoryId, asset, name, symbol, state, totalAssets, totalSupply,
-       fundingTarget, fundingDeadline, minDeposit, maxDepositPerUser],
+       fundingTarget, fundingDeadline, minDeposit, maxDepositPerUser,
+       rwaName, rwaSymbol, rwaDocumentUri],
     );
 
     logger.info({ contractId }, "Vault upserted successfully");
+  }
+
+  async listVaultOperators(contractId: string): Promise<{
+    operator: string;
+    addedBy: string;
+    addedAt: Date;
+    removedAt: Date | null;
+    removedBy: string | null;
+  }[]> {
+    const rows = await query<{
+      operator: string;
+      added_by: string;
+      added_at: Date;
+      removed_at: Date | null;
+      removed_by: string | null;
+    }>(
+      `SELECT vo.operator, vo.added_by, vo.added_at, vo.removed_at, vo.removed_by
+       FROM vault_operators vo
+       JOIN vaults v ON vo.vault_id = v.id
+       WHERE v.contract_id = $1 AND vo.removed_at IS NULL
+       ORDER BY vo.added_at DESC`,
+      [contractId],
+    );
+    return rows.map((r) => ({
+      operator: r.operator,
+      addedBy: r.added_by,
+      addedAt: r.added_at,
+      removedAt: r.removed_at,
+      removedBy: r.removed_by,
+    }));
+  }
+
+  async listVaultRoles(contractId: string): Promise<{
+    userAddress: string;
+    role: string;
+    grantedAt: Date;
+    revokedAt: Date | null;
+  }[]> {
+    const rows = await query<{
+      user_address: string;
+      role: string;
+      granted_at: Date;
+      revoked_at: Date | null;
+    }>(
+      `SELECT vr.user_address, vr.role, vr.granted_at, vr.revoked_at
+       FROM vault_roles vr
+       JOIN vaults v ON vr.vault_id = v.id
+       WHERE v.contract_id = $1 AND vr.revoked_at IS NULL
+       ORDER BY vr.granted_at DESC`,
+      [contractId],
+    );
+    return rows.map((r) => ({
+      userAddress: r.user_address,
+      role: r.role,
+      grantedAt: r.granted_at,
+      revokedAt: r.revoked_at,
+    }));
   }
 
   /**

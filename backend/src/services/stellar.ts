@@ -157,6 +157,45 @@ export async function readCurrentEpoch(
  *
  * Closes #430
  */
+/**
+ * Read the RWA name from a vault contract.
+ * Returns null on simulation error.
+ */
+export async function readRwaName(contractId: string): Promise<string | null> {
+  try {
+    const raw = await simulateRead<string | Record<string, unknown>>(contractId, "rwa_name");
+    return typeof raw === "string" ? raw : String(Object.values(raw)[0] ?? "");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the RWA symbol from a vault contract.
+ * Returns null on simulation error.
+ */
+export async function readRwaSymbol(contractId: string): Promise<string | null> {
+  try {
+    const raw = await simulateRead<string | Record<string, unknown>>(contractId, "rwa_symbol");
+    return typeof raw === "string" ? raw : String(Object.values(raw)[0] ?? "");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the RWA document URI from a vault contract.
+ * Returns null on simulation error.
+ */
+export async function readRwaDocumentUri(contractId: string): Promise<string | null> {
+  try {
+    const raw = await simulateRead<string | Record<string, unknown>>(contractId, "rwa_document_uri");
+    return typeof raw === "string" ? raw : String(Object.values(raw)[0] ?? "");
+  } catch {
+    return null;
+  }
+}
+
 export async function readEpochData(
   contractId: string,
   epoch: number,

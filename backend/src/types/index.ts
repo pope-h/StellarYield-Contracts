@@ -23,6 +23,9 @@ export interface Vault {
   fundingProgress: number | null;
   minDeposit: string | null;
   maxDepositPerUser: string | null;
+  rwaName: string | null;
+  rwaSymbol: string | null;
+  rwaDocumentUri: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
