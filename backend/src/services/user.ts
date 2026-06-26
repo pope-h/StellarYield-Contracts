@@ -6,6 +6,7 @@ import type {
   YieldHistoryEntry,
 } from "../types/index.js";
 import { query } from "../db/index.js";
+import { YieldService } from "./yield.js";
 
 export class UserService {
   async getUser(address: string): Promise<User | null> {
@@ -70,6 +71,8 @@ export class UserService {
     );
 
     let totalDeposited = "0";
+    let totalPendingYield = BigInt(0);
+    const yieldService = new YieldService();
     const transformedPositions: UserVaultPosition[] = positions.map((row) => {
       const deposited = row.deposited || "0";
       totalDeposited = (BigInt(totalDeposited) + BigInt(deposited)).toString();
@@ -87,9 +90,23 @@ export class UserService {
       };
     });
 
+    for (const position of transformedPositions) {
+      if (position.contractId) {
+        const yieldData = await yieldService.getUserPendingYield(
+          position.contractId,
+          address,
+        );
+        totalPendingYield += BigInt(yieldData.pendingYield);
+      }
+    }
+
+    const totalValue = (BigInt(totalDeposited) + totalPendingYield).toString();
+
     return {
       positions: transformedPositions,
       totalDeposited,
+      totalPendingYield: totalPendingYield.toString(),
+      totalValue,
     };
   }
 

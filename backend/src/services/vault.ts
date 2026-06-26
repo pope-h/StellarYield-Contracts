@@ -370,5 +370,68 @@ export class VaultService {
       requestTime: row.request_time,
     }));
   }
+
+  async getCompoundProjection(
+    contractId: string,
+    shares: string,
+    epochs: number,
+  ): Promise<{ projectedValue: string; compoundedYield: string; epochsProjected: number } | null> {
+    const epochRows = await query<{
+      id: number;
+      yield_amount: string;
+      total_shares: string;
+    }>(
+      `SELECT e.id, e.yield_amount, e.total_shares
+       FROM epochs e
+       JOIN vaults v ON e.vault_id = v.id
+       WHERE v.contract_id = $1
+       ORDER BY e.epoch ASC`,
+      [contractId],
+    );
+
+    if (epochRows.length === 0) {
+      return null;
+    }
+
+    let sumYieldPerShare = BigInt(0);
+    const DECIMALS = BigInt(10) ** BigInt(18);
+
+    for (const row of epochRows) {
+      const yieldBig = BigInt(row.yield_amount);
+      const sharesBig = BigInt(row.total_shares);
+      if (sharesBig > BigInt(0)) {
+        const yieldPerShare = (yieldBig * DECIMALS) / sharesBig;
+        sumYieldPerShare += yieldPerShare;
+      }
+    }
+
+    const avgYieldPerShare = sumYieldPerShare / BigInt(epochRows.length);
+    const principal = BigInt(shares);
+
+    let projectedValue = principal;
+    for (let i = 0; i < epochs; i++) {
+      projectedValue = (projectedValue * (DECIMALS + avgYieldPerShare)) / DECIMALS;
+    }
+
+    const compoundedYield = projectedValue - principal;
+
+    const projectedStr = projectedValue.toString();
+    const projectedPadded = projectedStr.padStart(19, "0");
+    const projectedInt = projectedPadded.slice(0, -18);
+    const projectedFrac = projectedPadded.slice(-18);
+    const projectedFormatted = `${projectedInt}.${projectedFrac}`;
+
+    const yieldStr = compoundedYield.toString();
+    const yieldPadded = yieldStr.padStart(19, "0");
+    const yieldInt = yieldPadded.slice(0, -18);
+    const yieldFrac = yieldPadded.slice(-18);
+    const yieldFormatted = `${yieldInt}.${yieldFrac}`;
+
+    return {
+      projectedValue: projectedFormatted,
+      compoundedYield: yieldFormatted,
+      epochsProjected: epochs,
+    };
+  }
 }
 

@@ -15,6 +15,7 @@ import {
   getVaultTvlHistory,
   getEarlyRedemptionFee,
   exportVaultCsv,
+  getCompoundProjection,
 } from "../controllers/vaults.js";
 import { validateParams, validateQuery } from "../middleware/validate.js";
 
@@ -53,6 +54,8 @@ vaultsRouter.get("/:contractId/holders", validateParams(vaultParamsSchema), getV
 vaultsRouter.get("/:contractId/snapshot", validateParams(vaultParamsSchema), getVaultSnapshot);
 // Get vault TVL history: GET /api/v1/vaults/:contractId/tvl-history
 vaultsRouter.get("/:contractId/tvl-history", validateParams(vaultParamsSchema), getVaultTvlHistory);
+// Get compound projection: GET /api/v1/vaults/:contractId/compound-projection?shares=<amount>&epochs=<n>
+vaultsRouter.get("/:contractId/compound-projection", validateParams(vaultParamsSchema), getCompoundProjection);
 // Early redemption fee preview: GET /api/v1/vaults/:contractId/early-redemption-fee?shares=
 vaultsRouter.get(
   "/:contractId/early-redemption-fee",

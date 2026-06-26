@@ -60,6 +60,8 @@ export interface RedemptionRequest {
 export interface UserPortfolioResponse {
   positions: UserVaultPosition[];
   totalDeposited: string;
+  totalPendingYield: string;
+  totalValue: string;
 }
 
 export interface Epoch {

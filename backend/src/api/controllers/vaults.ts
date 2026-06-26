@@ -391,6 +391,77 @@ export async function getVaultHolders(req: Request, res: Response, next: NextFun
 }
 
 /**
+ * GET /api/v1/vaults/:contractId/compound-projection?shares=<amount>&epochs=<n>
+ *
+ * Returns a compounded yield projection assuming reinvestment of yield.
+ * Query params:
+ *   - shares: number of shares (required, must be positive)
+ *   - epochs: number of epochs to project (required, must be positive)
+ *
+ * Response: { projectedValue: string; compoundedYield: string; epochsProjected: number }
+ * Returns 400 if shares or epochs are non-positive, 404 if vault has no epochs.
+ */
+export async function getCompoundProjection(req: Request, res: Response, next: NextFunction) {
+  try {
+    const sharesParam = req.query.shares;
+    const epochsParam = req.query.epochs;
+
+    if (typeof sharesParam !== "string" || !/^\d+$/.test(sharesParam)) {
+      res.status(400).json({
+        error: "BadRequest",
+        message: "shares query parameter is required and must be a positive integer",
+      });
+      return;
+    }
+
+    if (typeof epochsParam !== "string" || !/^\d+$/.test(epochsParam)) {
+      res.status(400).json({
+        error: "BadRequest",
+        message: "epochs query parameter is required and must be a positive integer",
+      });
+      return;
+    }
+
+    const shares = BigInt(sharesParam);
+    const epochs = parseInt(epochsParam, 10);
+
+    if (shares <= 0n) {
+      res.status(400).json({
+        error: "BadRequest",
+        message: "shares must be greater than zero",
+      });
+      return;
+    }
+
+    if (epochs <= 0) {
+      res.status(400).json({
+        error: "BadRequest",
+        message: "epochs must be greater than zero",
+      });
+      return;
+    }
+
+    const projection = await vaultService.getCompoundProjection(
+      String(req.params["contractId"]),
+      sharesParam,
+      epochs,
+    );
+
+    if (!projection) {
+      res.status(404).json({
+        error: "NotFound",
+        message: "Vault has no epoch history to project from",
+      });
+      return;
+    }
+
+    res.json(projection);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
  * GET /api/v1/vaults/:contractId/tvl-history
  *
  * Returns TVL snapshots in the requested time range.
