@@ -4,8 +4,10 @@ import type {
   UserPortfolioResponse,
   PaginatedResponse,
   YieldHistoryEntry,
+  ShareBalanceHistoryEntry,
 } from "../types/index.js";
 import { query } from "../db/index.js";
+import { YieldService } from "./yield.js";
 
 export class UserService {
   async getUser(address: string): Promise<User | null> {
@@ -48,6 +50,33 @@ export class UserService {
     );
   }
 
+  async getTotalPendingYield(address: string): Promise<string> {
+    const positions = await query<{
+      contract_id: string;
+    }>(
+      `SELECT v.contract_id
+       FROM user_vault_positions uvp
+       JOIN vaults v ON uvp.vault_id = v.id
+       WHERE uvp.user_address = $1 AND uvp.shares > 0`,
+      [address],
+    );
+
+    if (positions.length === 0) return "0";
+
+    let totalPendingYield = BigInt(0);
+    const yieldService = new YieldService();
+
+    for (const row of positions) {
+      const yieldData = await yieldService.getUserPendingYield(
+        row.contract_id,
+        address,
+      );
+      totalPendingYield += BigInt(yieldData.pendingYield);
+    }
+
+    return totalPendingYield.toString();
+  }
+
   async getUserPortfolio(address: string): Promise<UserPortfolioResponse> {
     const positions = await query<{
       id: number;
@@ -70,6 +99,8 @@ export class UserService {
     );
 
     let totalDeposited = "0";
+    let totalPendingYield = BigInt(0);
+    const yieldService = new YieldService();
     const transformedPositions: UserVaultPosition[] = positions.map((row) => {
       const deposited = row.deposited || "0";
       totalDeposited = (BigInt(totalDeposited) + BigInt(deposited)).toString();
@@ -87,10 +118,69 @@ export class UserService {
       };
     });
 
+    for (const position of transformedPositions) {
+      if (position.contractId) {
+        const yieldData = await yieldService.getUserPendingYield(
+          position.contractId,
+          address,
+        );
+        totalPendingYield += BigInt(yieldData.pendingYield);
+      }
+    }
+
+    const totalValue = (BigInt(totalDeposited) + totalPendingYield).toString();
+
     return {
       positions: transformedPositions,
       totalDeposited,
+      totalPendingYield: totalPendingYield.toString(),
+      totalValue,
     };
+  }
+
+  async getShareBalanceHistory(
+    address: string,
+    vaultId?: string,
+  ): Promise<ShareBalanceHistoryEntry[]> {
+    if (vaultId) {
+      const rows = await query<{
+        epoch: number;
+        shares: string;
+        recorded_at: Date;
+      }>(
+        `SELECT sbs.epoch, sbs.shares, sbs.recorded_at
+         FROM share_balance_snapshots sbs
+         JOIN vaults v ON sbs.vault_id = v.id
+         WHERE sbs.user_address = $1 AND v.contract_id = $2
+         ORDER BY sbs.epoch ASC`,
+        [address, vaultId],
+      );
+
+      return rows.map((row) => ({
+        epoch: row.epoch,
+        shares: row.shares,
+        recordedAt: row.recorded_at,
+      }));
+    }
+
+    const rows = await query<{
+      epoch: number;
+      shares: string;
+      recorded_at: Date;
+    }>(
+      `SELECT epoch, SUM(shares)::text AS shares, MAX(recorded_at) AS recorded_at
+       FROM share_balance_snapshots
+       WHERE user_address = $1
+       GROUP BY epoch
+       ORDER BY epoch ASC`,
+      [address],
+    );
+
+    return rows.map((row) => ({
+      epoch: row.epoch,
+      shares: row.shares,
+      recordedAt: row.recorded_at,
+    }));
   }
 
   /**
