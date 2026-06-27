@@ -7,6 +7,15 @@ import type {
 } from "../types/index.js";
 import { query } from "../db/index.js";
 import { logger } from "../logger.js";
+import { cacheGet, cacheSet, cacheDel } from "../cache/redis.js";
+
+const TTL_BY_STATE: Record<string, number> = {
+  Active: 10,
+  Funding: 30,
+  Cancelled: 600,
+  Matured: 600,
+};
+const DEFAULT_TTL = 30;
 
 interface ListVaultsOptions {
   page: number;
@@ -83,6 +92,10 @@ function mapVaultRow(row: VaultRow): Vault {
 
 export class VaultService {
   async listVaults(opts: ListVaultsOptions): Promise<PaginatedResponse<Vault>> {
+    const cacheKey = `vaults:list:${JSON.stringify(opts)}`;
+    const cached = await cacheGet<PaginatedResponse<Vault>>(cacheKey);
+    if (cached) return cached;
+
     const { page, pageSize, state, category, cursor, sort, order } = opts;
     const sortColumn = sort === "total_assets" ? "total_assets" : "created_at";
     const sortDirection = order === "asc" ? "ASC" : "DESC";
@@ -216,13 +229,10 @@ export class VaultService {
 
     const data: Vault[] = vaults.map(mapVaultRow);
 
-    return {
-      data,
-      total,
-      page,
-      pageSize,
-      nextCursor,
-    };
+    const result: PaginatedResponse<Vault> = { data, total, page, pageSize, nextCursor };
+    const listTtl = TTL_BY_STATE[state ?? ""] ?? DEFAULT_TTL;
+    await cacheSet(cacheKey, result, listTtl);
+    return result;
   }
 
   async countVaults(): Promise<number> {
@@ -261,6 +271,10 @@ export class VaultService {
   }
 
   async getVault(contractId: string): Promise<Vault | null> {
+    const cacheKey = `vault:${contractId}`;
+    const cached = await cacheGet<Vault>(cacheKey);
+    if (cached) return cached;
+
     const rows = await query<VaultRow>(
       `SELECT v.id, v.contract_id, v.factory_id, v.asset, v.name, v.symbol, v.state,
               v.total_assets, v.total_supply, v.total_shares_ever_minted, v.total_shares_ever_burned,
@@ -279,7 +293,10 @@ export class VaultService {
 
     if (rows.length === 0) return null;
 
-    return mapVaultRow(rows[0]);
+    const vault = mapVaultRow(rows[0]);
+    const ttl = TTL_BY_STATE[vault.state] ?? DEFAULT_TTL;
+    await cacheSet(cacheKey, vault, ttl);
+    return vault;
   }
 
   async getVaultPositions(contractId: string): Promise<UserVaultPosition[]> {
@@ -461,6 +478,8 @@ export class VaultService {
     );
 
     logger.info({ contractId }, "Vault upserted successfully");
+    await cacheDel(`vault:${contractId}`);
+    await cacheDel("vaults:list:*");
   }
 
   async listVaultOperators(contractId: string): Promise<{

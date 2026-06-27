@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
+import { createHash } from "crypto";
 import { z } from "zod";
 import { VaultService } from "../../services/vault.js";
 import { readTotalAssets, readVaultState } from "../../services/stellar.js";
@@ -88,7 +89,13 @@ export async function getVault(req: Request, res: Response, next: NextFunction) 
       res.status(404).json({ error: "NotFound", message: "Vault not found" });
       return;
     }
+    const etag = `W/"${createHash("sha1").update(JSON.stringify(vault)).digest("hex")}"`;
+    if (req.headers["if-none-match"] === etag) {
+      res.status(304).end();
+      return;
+    }
     setCacheHeaders(res);
+    res.set("ETag", etag);
     res.json(vault);
   } catch (err) {
     next(err);
