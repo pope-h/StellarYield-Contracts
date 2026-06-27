@@ -83,6 +83,11 @@ const envSchema = z.object({
     .default("30000")
     .transform((v) => parseInt(v, 10))
     .pipe(z.number().int().min(1)),
+  DB_SLOW_QUERY_MS: z
+    .string()
+    .default("500")
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().min(1)),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -113,6 +118,7 @@ export const config = {
     poolMax: parsed.data.DB_POOL_MAX,
     idleTimeoutMs: parsed.data.DB_IDLE_TIMEOUT_MS,
     queryTimeoutMs: parsed.data.DB_QUERY_TIMEOUT_MS,
+    slowQueryMs: parsed.data.DB_SLOW_QUERY_MS,
   },
 
   indexer: {

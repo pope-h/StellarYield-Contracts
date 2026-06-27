@@ -20,12 +20,20 @@ export async function query<T = Record<string, unknown>>(
   const start = performance.now();
   const result = await pool.query(sql, params);
   const durationMs = performance.now() - start;
+  const roundedMs = Math.round(durationMs * 100) / 100;
 
-  if (logger.level === "debug" || logger.level === "trace") {
+  if (durationMs > config.db.slowQueryMs) {
+    // Slow queries get higher-visibility logging so they are easy to filter.
+    // The full SQL is included regardless of environment to aid diagnosis (#658).
+    logger.warn(
+      { sql, paramsCount: params?.length ?? 0, durationMs: roundedMs, rowCount: result.rowCount },
+      "slow query",
+    );
+  } else if (logger.level === "debug" || logger.level === "trace") {
     const firstLine = config.nodeEnv === "production"
       ? sql.slice(0, 80)
       : sql;
-    logger.debug({ sql: firstLine, durationMs: Math.round(durationMs * 100) / 100, rowCount: result.rowCount }, "query");
+    logger.debug({ sql: firstLine, durationMs: roundedMs, rowCount: result.rowCount }, "query");
   }
 
   return result.rows;
