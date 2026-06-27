@@ -252,6 +252,25 @@ export async function getVaultSnapshot(req: Request, res: Response, next: NextFu
     );
     const lastIndexedAt = lastEventRows[0]?.created_at?.toISOString() ?? null;
 
+    // Compute top-10 holder concentration metric
+    const top10Rows = await query<{ top10_shares: string }>(
+      `SELECT COALESCE(SUM(shares), 0)::text AS top10_shares
+       FROM (
+         SELECT uvp.shares
+         FROM user_vault_positions uvp
+         WHERE uvp.vault_id = $1 AND uvp.shares > 0
+         ORDER BY uvp.shares DESC
+         LIMIT 10
+       ) top10`,
+      [vault.id],
+    );
+    const totalSupplyNum = parseFloat(vault.totalSupply);
+    let top10HolderSharePercent: number | null = null;
+    if (totalSupplyNum > 0) {
+      const top10Shares = parseFloat(top10Rows[0]?.top10_shares ?? "0");
+      top10HolderSharePercent = Math.round((top10Shares / totalSupplyNum) * 100 * 100) / 100;
+    }
+
     const snapshot = {
       state: vault.state,
       totalAssets: vault.totalAssets,
@@ -259,10 +278,432 @@ export async function getVaultSnapshot(req: Request, res: Response, next: NextFu
       depositorCount: vault.depositorCount,
       epochCount,
       lastIndexedAt,
+      top10HolderSharePercent,
     };
 
     setCacheHeaders(res);
     res.json(snapshot);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/vaults/:contractId/holders/top?n=10
+ *
+ * Returns the top N shareholders (max 20) with rank, userAddress, shares, sharePercent.
+ * sharePercent = shares / total_supply * 100.
+ */
+export async function getVaultTopHolders(req: Request, res: Response, next: NextFunction) {
+  try {
+    const contractId = String(req.params["contractId"]);
+
+    const nParam = req.query["n"];
+    const n = Math.min(20, Math.max(1, parseInt(String(nParam ?? "10"), 10) || 10));
+
+    const vaultRows = await query<{ id: number; total_supply: string }>(
+      "SELECT id, total_supply FROM vaults WHERE contract_id = $1",
+      [contractId],
+    );
+    if (vaultRows.length === 0) {
+      res.status(404).json({ error: "NotFound", message: "Vault not found" });
+      return;
+    }
+    const { id: vaultId, total_supply } = vaultRows[0];
+    const totalSupply = parseFloat(total_supply ?? "0");
+
+    const rows = await query<{ user_address: string; shares: string }>(
+      `SELECT user_address, shares
+       FROM user_vault_positions
+       WHERE vault_id = $1 AND shares > 0
+       ORDER BY shares DESC
+       LIMIT $2`,
+      [vaultId, n],
+    );
+
+    const data = rows.map((row, index) => ({
+      rank: index + 1,
+      userAddress: row.user_address,
+      shares: row.shares,
+      sharePercent: totalSupply > 0
+        ? Math.round((parseFloat(row.shares) / totalSupply) * 100 * 10000) / 10000
+        : 0,
+    }));
+
+    setCacheHeaders(res);
+    res.json(data);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/vaults/:contractId/holders
+ *
+ * Returns active holders for a vault, paginated and sorted descending by
+ * shares by default. The total is the full active-holder count.
+ */
+export async function getVaultHolders(req: Request, res: Response, next: NextFunction) {
+  try {
+    const contractId = String(req.params["contractId"]);
+    const page = Number(req.query["page"] ?? 1);
+    const pageSize = Number(req.query["pageSize"] ?? 20);
+    const sort = req.query["sort"] === "deposited" ? "deposited" : "shares";
+
+    const result = await vaultService.listVaultHolders(contractId, {
+      page,
+      pageSize,
+      sort,
+    });
+
+    if (!result) {
+      res.status(404).json({ error: "NotFound", message: "Vault not found" });
+      return;
+    }
+
+    setCacheHeaders(res);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/vaults/:contractId/operators
+ *
+ * Returns the current active operators for a vault.
+ */
+export async function getVaultOperators(req: Request, res: Response, next: NextFunction) {
+  try {
+    const vault = await vaultService.getVault(String(req.params["contractId"]));
+    if (!vault) {
+      res.status(404).json({ error: "NotFound", message: "Vault not found" });
+      return;
+    }
+    const operators = await vaultService.listVaultOperators(String(req.params["contractId"]));
+    setCacheHeaders(res);
+    res.json(operators);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/vaults/:contractId/roles
+ *
+ * Returns the current active roles for a vault.
+ */
+export async function getVaultRoles(req: Request, res: Response, next: NextFunction) {
+  try {
+    const vault = await vaultService.getVault(String(req.params["contractId"]));
+    if (!vault) {
+      res.status(404).json({ error: "NotFound", message: "Vault not found" });
+      return;
+    }
+    const roles = await vaultService.listVaultRoles(String(req.params["contractId"]));
+    setCacheHeaders(res);
+    res.json(roles);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/vaults/:contractId/holders/count
+ *
+ * Returns the active shareholder count for a vault.
+ */
+export async function getVaultHolderCount(req: Request, res: Response, next: NextFunction) {
+  try {
+    const count = await vaultService.countVaultHolders(String(req.params["contractId"]));
+    if (count == null) {
+      res.status(404).json({ error: "NotFound", message: "Vault not found" });
+      return;
+    }
+
+    res.set("Cache-Control", "max-age=30");
+    res.json({ count });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/vaults/:contractId/holders/export.csv
+ *
+ * Exports active holders as CSV columns:
+ * userAddress, shares, deposited, lastUpdatedAt.
+ */
+export async function exportVaultHoldersCsv(req: Request, res: Response, next: NextFunction) {
+  try {
+    const contractId = String(req.params["contractId"]);
+    const holders = await vaultService.getVaultHoldersForExport(contractId);
+    if (!holders) {
+      res.status(404).json({ error: "NotFound", message: "Vault not found" });
+      return;
+    }
+
+    const columns = ["userAddress", "shares", "deposited", "lastUpdatedAt"];
+    const rows = holders.map((holder) => [
+      holder.userAddress,
+      holder.shares,
+      holder.deposited,
+      holder.lastUpdatedAt.toISOString(),
+    ]);
+    const csv = [
+      columns.map(csvEscape).join(","),
+      ...rows.map((row) => row.map(csvEscape).join(",")),
+    ].join("\r\n") + "\r\n";
+
+    res.set("Content-Type", "text/csv");
+    res.set("Content-Disposition", `attachment; filename="holders-${contractId}.csv"`);
+    res.send(csv);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/vaults/:contractId/report?year=2025
+ *
+ * Returns a year-over-year summary of a vault's performance for tax and
+ * reporting purposes.
+ *
+ * Response:
+ *   { year, totalYieldDistributed, epochCount, averageYieldPerEpoch,
+ *     startTotalAssets, endTotalAssets, netAssetGrowth }
+ *
+ * All monetary values are BigInt-safe strings.
+ * Returns zeroes for a year with no epochs.
+ */
+export async function getVaultAnnualReport(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = contractAddressSchema.safeParse(req.params["contractId"]);
+    if (!parsed.success) {
+      res.status(400).json({ error: "BadRequest", message: "Invalid contractId format" });
+      return;
+    }
+    const contractId = parsed.data;
+
+    const yearParam = req.query["year"];
+    if (typeof yearParam !== "string" || !/^\d{4}$/.test(yearParam)) {
+      res.status(400).json({ error: "BadRequest", message: "year query parameter is required and must be a 4-digit year" });
+      return;
+    }
+    const year = parseInt(yearParam, 10);
+
+    const vaultRow = await query<{ id: number }>(
+      "SELECT id FROM vaults WHERE contract_id = $1",
+      [contractId],
+    );
+    if (vaultRow.length === 0) {
+      res.status(404).json({ error: "NotFound", message: "Vault not found" });
+      return;
+    }
+    const vaultId = vaultRow[0].id;
+
+    const yearStart = new Date(`${year}-01-01T00:00:00.000Z`);
+    const yearEnd = new Date(`${year + 1}-01-01T00:00:00.000Z`);
+
+    // Aggregate epoch data for the requested year
+    const epochRows = await query<{ epoch_count: string; total_yield: string }>(
+      `SELECT COUNT(*)::text AS epoch_count,
+              COALESCE(SUM(yield_amount::numeric), 0)::text AS total_yield
+       FROM epochs
+       WHERE vault_id = $1
+         AND distributed_at >= $2
+         AND distributed_at < $3`,
+      [vaultId, yearStart, yearEnd],
+    );
+
+    const epochCount = parseInt(epochRows[0]?.epoch_count ?? "0", 10);
+    const totalYieldDistributed = epochRows[0]?.total_yield ?? "0";
+    const totalYieldBig = BigInt(Math.round(parseFloat(totalYieldDistributed)));
+    const averageYieldPerEpoch = epochCount > 0
+      ? (totalYieldBig / BigInt(epochCount)).toString()
+      : "0";
+
+    // Nearest snapshot at or after year start (startTotalAssets)
+    const startSnapshotRows = await query<{ total_assets: string }>(
+      `SELECT total_assets::text
+       FROM vault_tvl_snapshots
+       WHERE vault_id = $1 AND recorded_at >= $2
+       ORDER BY recorded_at ASC
+       LIMIT 1`,
+      [vaultId, yearStart],
+    );
+
+    // Nearest snapshot at or before year end (endTotalAssets)
+    const endSnapshotRows = await query<{ total_assets: string }>(
+      `SELECT total_assets::text
+       FROM vault_tvl_snapshots
+       WHERE vault_id = $1 AND recorded_at < $2
+       ORDER BY recorded_at DESC
+       LIMIT 1`,
+      [vaultId, yearEnd],
+    );
+
+    const startTotalAssets = startSnapshotRows[0]?.total_assets ?? "0";
+    const endTotalAssets = endSnapshotRows[0]?.total_assets ?? "0";
+
+    const startBig = BigInt(Math.round(parseFloat(startTotalAssets)));
+    const endBig = BigInt(Math.round(parseFloat(endTotalAssets)));
+    const netAssetGrowth = (endBig - startBig).toString();
+
+    setCacheHeaders(res);
+    res.json({
+      year,
+      totalYieldDistributed: totalYieldBig.toString(),
+      epochCount,
+      averageYieldPerEpoch,
+      startTotalAssets: startBig.toString(),
+      endTotalAssets: endBig.toString(),
+      netAssetGrowth,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/vaults/:contractId/epochs/:epoch/breakdown?page=1&pageSize=20
+ *
+ * Returns a per-user yield breakdown for a specific epoch. For each holder,
+ * computes yieldAmount = epochYield * userShares / totalShares.
+ * Paginated with page + pageSize.
+ * Returns 404 for a non-existent epoch.
+ */
+export async function getEpochBreakdown(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = contractAddressSchema.safeParse(req.params["contractId"]);
+    if (!parsed.success) {
+      res.status(400).json({ error: "BadRequest", message: "Invalid contractId format" });
+      return;
+    }
+    const contractId = parsed.data;
+
+    const epochParam = req.params["epoch"];
+    const epochNum = parseInt(String(epochParam), 10);
+    if (isNaN(epochNum) || epochNum < 0) {
+      res.status(400).json({ error: "BadRequest", message: "epoch must be a non-negative integer" });
+      return;
+    }
+
+    const page = Math.max(1, parseInt(String(req.query["page"] ?? "1"), 10) || 1);
+    const pageSize = Math.min(200, Math.max(1, parseInt(String(req.query["pageSize"] ?? "20"), 10) || 20));
+    const offset = (page - 1) * pageSize;
+
+    // Look up vault and epoch
+    const epochRows = await query<{ id: number; vault_id: number; yield_amount: string; total_shares: string }>(
+      `SELECT e.id, e.vault_id, e.yield_amount, e.total_shares
+       FROM epochs e
+       JOIN vaults v ON e.vault_id = v.id
+       WHERE v.contract_id = $1 AND e.epoch = $2`,
+      [contractId, epochNum],
+    );
+
+    if (epochRows.length === 0) {
+      res.status(404).json({ error: "NotFound", message: "Epoch not found" });
+      return;
+    }
+
+    const { vault_id: vaultId, yield_amount: yieldAmount, total_shares: totalShares } = epochRows[0];
+
+    // Use share_balance_snapshots for accurate per-epoch holder balances
+    const countRows = await query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM share_balance_snapshots
+       WHERE vault_id = $1 AND epoch = $2 AND shares > 0`,
+      [vaultId, epochNum],
+    );
+    const total = parseInt(countRows[0]?.count ?? "0", 10);
+
+    const holderRows = await query<{ user_address: string; shares: string }>(
+      `SELECT user_address, shares::text
+       FROM share_balance_snapshots
+       WHERE vault_id = $1 AND epoch = $2 AND shares > 0
+       ORDER BY shares DESC
+       LIMIT $3 OFFSET $4`,
+      [vaultId, epochNum, pageSize, offset],
+    );
+
+    const yieldBig = BigInt(Math.round(parseFloat(yieldAmount)));
+    const totalSharesBig = BigInt(Math.round(parseFloat(totalShares)));
+
+    const data = holderRows.map((row) => {
+      const userSharesBig = BigInt(Math.round(parseFloat(row.shares)));
+      const yieldAmt = totalSharesBig > 0n
+        ? (yieldBig * userSharesBig / totalSharesBig).toString()
+        : "0";
+      return {
+        userAddress: row.user_address,
+        shares: row.shares,
+        yieldAmount: yieldAmt,
+      };
+    });
+
+    setCacheHeaders(res);
+    res.json({ data, total, page, pageSize, epochYield: yieldBig.toString() });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getCompoundProjection(req: Request, res: Response, next: NextFunction) {
+  try {
+    const sharesParam = req.query.shares;
+    const epochsParam = req.query.epochs;
+
+    if (typeof sharesParam !== "string" || !/^\d+$/.test(sharesParam)) {
+      res.status(400).json({
+        error: "BadRequest",
+        message: "shares query parameter is required and must be a positive integer",
+      });
+      return;
+    }
+
+    if (typeof epochsParam !== "string" || !/^\d+$/.test(epochsParam)) {
+      res.status(400).json({
+        error: "BadRequest",
+        message: "epochs query parameter is required and must be a positive integer",
+      });
+      return;
+    }
+
+    const shares = BigInt(sharesParam);
+    const epochs = parseInt(epochsParam, 10);
+
+    if (shares <= 0n) {
+      res.status(400).json({
+        error: "BadRequest",
+        message: "shares must be greater than zero",
+      });
+      return;
+    }
+
+    if (epochs <= 0) {
+      res.status(400).json({
+        error: "BadRequest",
+        message: "epochs must be greater than zero",
+      });
+      return;
+    }
+
+    const projection = await vaultService.getCompoundProjection(
+      String(req.params["contractId"]),
+      sharesParam,
+      epochs,
+    );
+
+    if (!projection) {
+      res.status(404).json({
+        error: "NotFound",
+        message: "Vault has no epoch history to project from",
+      });
+      return;
+    }
+
+    res.json(projection);
   } catch (err) {
     next(err);
   }

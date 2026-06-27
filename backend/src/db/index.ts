@@ -4,7 +4,13 @@ import { logger } from "../logger.js";
 
 const { Pool } = pg;
 
-export const pool = new Pool({ connectionString: config.db.url });
+export const pool = new Pool({
+  connectionString: config.db.url,
+  min: config.db.poolMin,
+  max: config.db.poolMax,
+  idleTimeoutMillis: config.db.idleTimeoutMs,
+  query_timeout: config.db.queryTimeoutMs,
+});
 
 export async function query<T = Record<string, unknown>>(
   sql: string,
