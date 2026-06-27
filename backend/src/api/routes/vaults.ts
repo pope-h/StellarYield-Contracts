@@ -7,7 +7,6 @@ import {
   getVault,
   getVaultLiveState,
   getVaultLiveTotalAssets,
-  getVaultPositions,
   getRedemptionQueue,
   getVaultSnapshot,
   getVaultTopHolders,
@@ -20,6 +19,10 @@ import {
   getCompoundProjection,
   getVaultAnnualReport,
   getEpochBreakdown,
+  searchVaults,
+  checkVaultName,
+  getTrendingVaults,
+  getNewVaults,
 } from "../controllers/vaults.js";
 import { validateParams, validateQuery } from "../middleware/validate.js";
 import { requireApiKey } from "../middleware/auth.js";
@@ -48,7 +51,33 @@ const vaultHoldersQuerySchema = z.object({
   sort: z.enum(["shares", "deposited"]).default("shares"),
 });
 
+const searchVaultsQuerySchema = z.object({
+  q: z.string().optional(),
+  category: z.string().optional(),
+  state: z.string().optional(),
+  sort: z.enum(["created_at", "total_assets"]).default("created_at"),
+  order: z.enum(["asc", "desc"]).default("desc"),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).default(20).transform((value) => Math.min(value, 100)),
+});
+
+const newVaultsQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(30).default(7),
+});
+
 export const vaultsRouter = Router();
+
+// These static routes must be registered BEFORE /:contractId to avoid Express
+// treating them as a contractId parameter.
+
+// #640: Combined search
+vaultsRouter.get("/search", validateQuery(searchVaultsQuerySchema), searchVaults);
+// #641: Name availability check
+vaultsRouter.get("/name-check", checkVaultName);
+// #642: Trending vaults
+vaultsRouter.get("/trending", getTrendingVaults);
+// #643: New vaults
+vaultsRouter.get("/new", validateQuery(newVaultsQuerySchema), getNewVaults);
 
 vaultsRouter.get("/", validateQuery(listVaultsQuerySchema), listVaults);
 vaultsRouter.get("/count", getVaultCount);
