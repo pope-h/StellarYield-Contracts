@@ -20,6 +20,13 @@ import {
   getVaultAnnualReport,
   getEpochBreakdown,
   listCategories,
+  searchVaults,
+  checkVaultName,
+  getTrendingVaults,
+  getNewVaults,
+  getMaturingSoonVaults,
+  getFullyFundedVaults,
+  getSimilarVaults,
 } from "../controllers/vaults.js";
 import { validateParams, validateQuery } from "../middleware/validate.js";
 import { requireApiKey } from "../middleware/auth.js";
@@ -59,10 +66,15 @@ const searchVaultsQuerySchema = z.object({
   order: z.enum(["asc", "desc"]).default("desc"),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).default(20).transform((value) => Math.min(value, 100)),
+  fuzzy: z.coerce.boolean().default(false),
 });
 
 const newVaultsQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(30).default(7),
+});
+
+const maturingSoonQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(90).default(30),
 });
 
 export const vaultsRouter = Router();
@@ -70,6 +82,13 @@ export const vaultsRouter = Router();
 vaultsRouter.get("/categories", listCategories);
 vaultsRouter.get("/", validateQuery(listVaultsQuerySchema), listVaults);
 vaultsRouter.get("/count", getVaultCount);
+// Search, filter, and discovery endpoints (#640–#643, #644, #645)
+vaultsRouter.get("/search", validateQuery(searchVaultsQuerySchema), searchVaults);
+vaultsRouter.get("/name-check", checkVaultName);
+vaultsRouter.get("/trending", getTrendingVaults);
+vaultsRouter.get("/new", validateQuery(newVaultsQuerySchema), getNewVaults);
+vaultsRouter.get("/maturing-soon", validateQuery(maturingSoonQuerySchema), getMaturingSoonVaults);
+vaultsRouter.get("/fully-funded", getFullyFundedVaults);
 vaultsRouter.get("/factory/:factoryId", validateParams(vaultFactoryParamsSchema), listVaultsByFactory);
 vaultsRouter.get("/:contractId", validateParams(vaultParamsSchema), getVault);
 vaultsRouter.get("/:contractId/state/live", validateParams(vaultParamsSchema), getVaultLiveState);
@@ -111,3 +130,5 @@ vaultsRouter.get("/:contractId/export.csv", validateParams(vaultParamsSchema), e
 vaultsRouter.get("/:contractId/report", validateParams(vaultParamsSchema), getVaultAnnualReport);
 // Per-user yield breakdown for a specific epoch: GET /api/v1/vaults/:contractId/epochs/:epoch/breakdown
 vaultsRouter.get("/:contractId/epochs/:epoch/breakdown", validateParams(vaultParamsSchema), getEpochBreakdown);
+// Similar vaults by category and TVL proximity: GET /api/v1/vaults/:contractId/similar
+vaultsRouter.get("/:contractId/similar", validateParams(vaultParamsSchema), getSimilarVaults);

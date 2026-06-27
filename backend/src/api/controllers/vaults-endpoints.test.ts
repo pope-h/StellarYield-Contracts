@@ -6,6 +6,9 @@ const mocks = vi.hoisted(() => ({
   listVaultHolders: vi.fn(),
   countVaultHolders: vi.fn(),
   getVaultHoldersForExport: vi.fn(),
+  getMaturitySoonVaults: vi.fn(),
+  getFullyFundedVaults: vi.fn(),
+  getSimilarVaults: vi.fn(),
 }));
 
 vi.mock("../../services/vault.js", () => ({
@@ -15,6 +18,9 @@ vi.mock("../../services/vault.js", () => ({
     listVaultHolders: mocks.listVaultHolders,
     countVaultHolders: mocks.countVaultHolders,
     getVaultHoldersForExport: mocks.getVaultHoldersForExport,
+    getMaturitySoonVaults: mocks.getMaturitySoonVaults,
+    getFullyFundedVaults: mocks.getFullyFundedVaults,
+    getSimilarVaults: mocks.getSimilarVaults,
   })),
 }));
 vi.mock("../../services/stellar.js", () => ({
@@ -29,6 +35,9 @@ import {
   getVaultHolders,
   getVaultHolderCount,
   exportVaultHoldersCsv,
+  getMaturingSoonVaults,
+  getFullyFundedVaults,
+  getSimilarVaults,
 } from "./vaults.js";
 
 const CONTRACT_ID = "CDLZFC3SYJYHZDQA6M57EYUC2XBDA6LQF3M6KFRDZ7TXJYJL2K3B";
@@ -303,5 +312,126 @@ describe("exportVaultHoldersCsv", () => {
       "GUSER1,200,100,2025-01-01T00:00:00.000Z\r\n" +
       "GUSER2,50,75,2025-01-02T00:00:00.000Z\r\n",
     );
+  });
+});
+
+describe("getMaturingSoonVaults", () => {
+  const next = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns active vaults maturing soon with default 30 days", async () => {
+    const vaults = [{ contractId: CONTRACT_ID, daysUntilMaturity: 10 }];
+    mocks.getMaturitySoonVaults.mockResolvedValue(vaults);
+    const res = makeRes();
+    const req = { query: {} } as any;
+
+    await getMaturingSoonVaults(req, res as any, next);
+
+    expect(mocks.getMaturitySoonVaults).toHaveBeenCalledWith(30);
+    expect(res.json).toHaveBeenCalledWith(vaults);
+  });
+
+  it("clamps days parameter to 1-90 range", async () => {
+    mocks.getMaturitySoonVaults.mockResolvedValue([]);
+    const res = makeRes();
+    const req = { query: { days: "200" } } as any;
+
+    await getMaturingSoonVaults(req, res as any, next);
+
+    expect(mocks.getMaturitySoonVaults).toHaveBeenCalledWith(90);
+  });
+
+  it("returns empty array when no vaults are maturing soon", async () => {
+    mocks.getMaturitySoonVaults.mockResolvedValue([]);
+    const res = makeRes();
+    const req = { query: { days: "7" } } as any;
+
+    await getMaturingSoonVaults(req, res as any, next);
+
+    expect(res.json).toHaveBeenCalledWith([]);
+  });
+});
+
+describe("getFullyFundedVaults", () => {
+  const next = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns fully-funded vaults with cache headers", async () => {
+    const vaults = [
+      { contractId: CONTRACT_ID, state: "Funding", fundingProgress: 100 },
+    ];
+    mocks.getFullyFundedVaults.mockResolvedValue(vaults);
+    const res = makeRes();
+    const req = {} as any;
+
+    await getFullyFundedVaults(req, res as any, next);
+
+    expect(mocks.getFullyFundedVaults).toHaveBeenCalled();
+    expect(res.set).toHaveBeenCalledWith("Cache-Control", "max-age=10, stale-while-revalidate=60");
+    expect(res.json).toHaveBeenCalledWith(vaults);
+  });
+
+  it("returns empty array when no fully-funded vaults exist", async () => {
+    mocks.getFullyFundedVaults.mockResolvedValue([]);
+    const res = makeRes();
+    const req = {} as any;
+
+    await getFullyFundedVaults(req, res as any, next);
+
+    expect(res.json).toHaveBeenCalledWith([]);
+  });
+});
+
+describe("getSimilarVaults", () => {
+  const next = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns 404 when the target vault does not exist", async () => {
+    mocks.getSimilarVaults.mockResolvedValue(null);
+    const res = makeRes();
+    const req = { params: { contractId: CONTRACT_ID } } as any;
+
+    await getSimilarVaults(req, res as any, next);
+
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  it("returns similar vaults with cache headers", async () => {
+    const similar = [
+      {
+        contractId: "CDLZFC3SYJYHZDQA6M57EYUC2XBDA6LQF3M6KFRDZ7TXJYJL2K3C",
+        name: "RE Fund 2",
+        totalAssets: "5500",
+        rwaCategory: "real-estate",
+      },
+    ];
+    mocks.getSimilarVaults.mockResolvedValue(similar);
+    const res = makeRes();
+    const req = { params: { contractId: CONTRACT_ID } } as any;
+
+    await getSimilarVaults(req, res as any, next);
+
+    expect(mocks.getSimilarVaults).toHaveBeenCalledWith(CONTRACT_ID);
+    expect(res.set).toHaveBeenCalledWith("Cache-Control", "max-age=10, stale-while-revalidate=60");
+    expect(res.json).toHaveBeenCalledWith(similar);
+  });
+
+  it("returns empty array when no similar vaults exist", async () => {
+    mocks.getSimilarVaults.mockResolvedValue([]);
+    const res = makeRes();
+    const req = { params: { contractId: CONTRACT_ID } } as any;
+
+    await getSimilarVaults(req, res as any, next);
+
+    expect(res.json).toHaveBeenCalledWith([]);
   });
 });

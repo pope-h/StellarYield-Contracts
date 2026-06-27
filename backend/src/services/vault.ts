@@ -25,7 +25,7 @@ interface ListVaultsOptions {
   cursor?: string;
   sort: "created_at" | "total_assets";
   order: "asc" | "desc";
-  q?: string;
+  q?: string; // forwarded from controller; listVaults currently delegates text search to /search
 }
 
 interface VaultRow {
@@ -670,7 +670,7 @@ export class VaultService {
     }));
   }
 
-  // ── Issue #640: Combined search ──────────────────────────────────────────────
+  // ── Issue #640 / #646: Combined search with optional fuzzy matching ──────────
   async searchVaults(opts: {
     q?: string;
     category?: string;
@@ -679,8 +679,9 @@ export class VaultService {
     pageSize: number;
     sort: string;
     order: string;
+    fuzzy?: boolean;
   }): Promise<PaginatedResponse<Vault>> {
-    const { q, category, state, page, pageSize, sort, order } = opts;
+    const { q, category, state, page, pageSize, sort, order, fuzzy } = opts;
     const offset = (page - 1) * pageSize;
     const sortColumn = sort === "total_assets" ? "total_assets" : "created_at";
     const sortDirection = order === "asc" ? "ASC" : "DESC";
@@ -693,11 +694,16 @@ export class VaultService {
       params.push(state);
     }
     if (q) {
-      conditions.push(`(v.name ILIKE $${params.length + 1} OR v.symbol ILIKE $${params.length + 1} OR v.rwa_name ILIKE $${params.length + 1})`);
-      params.push(`%${q}%`);
+      if (fuzzy) {
+        conditions.push(`similarity(v.name, $${params.length + 1}) > 0.3`);
+        params.push(q);
+      } else {
+        conditions.push(`(v.name ILIKE $${params.length + 1} OR v.symbol ILIKE $${params.length + 1} OR v.rwa_name ILIKE $${params.length + 1})`);
+        params.push(`%${q}%`);
+      }
     }
     if (category) {
-      conditions.push(`v.rwa_name ILIKE $${params.length + 1}`);
+      conditions.push(`v.rwa_category = $${params.length + 1}`);
       params.push(category);
     }
 
@@ -708,7 +714,7 @@ export class VaultService {
               v.total_assets, v.total_supply, v.total_shares_ever_minted, v.total_shares_ever_burned,
               v.created_at, v.updated_at,
               v.funding_target, v.funding_deadline, v.min_deposit, v.max_deposit_per_user,
-              v.rwa_name, v.rwa_symbol, v.rwa_document_uri,
+              v.rwa_name, v.rwa_symbol, v.rwa_document_uri, v.rwa_category,
               COALESCE((
                 SELECT COUNT(*)::int
                 FROM user_vault_positions uvp
@@ -789,7 +795,7 @@ export class VaultService {
               v.total_assets, v.total_supply, v.total_shares_ever_minted, v.total_shares_ever_burned,
               v.created_at, v.updated_at,
               v.funding_target, v.funding_deadline, v.min_deposit, v.max_deposit_per_user,
-              v.rwa_name, v.rwa_symbol, v.rwa_document_uri,
+              v.rwa_name, v.rwa_symbol, v.rwa_document_uri, v.rwa_category,
               COALESCE((
                 SELECT COUNT(*)::int
                 FROM user_vault_positions uvp
@@ -802,6 +808,103 @@ export class VaultService {
     );
 
     return rows.map(mapVaultRow);
+  }
+
+  // ── Issue #644: Maturing-soon vaults ────────────────────────────────────────
+  async getMaturitySoonVaults(days: number): Promise<Array<Vault & { daysUntilMaturity: number }>> {
+    const rows = await query<VaultRow & { days_until_maturity: number }>(
+      `SELECT v.id, v.contract_id, v.factory_id, v.asset, v.name, v.symbol, v.state,
+              v.total_assets, v.total_supply, v.total_shares_ever_minted, v.total_shares_ever_burned,
+              v.created_at, v.updated_at,
+              v.funding_target, v.funding_deadline, v.min_deposit, v.max_deposit_per_user,
+              v.rwa_name, v.rwa_symbol, v.rwa_document_uri, v.rwa_category,
+              COALESCE((
+                SELECT COUNT(*)::int
+                FROM user_vault_positions uvp
+                WHERE uvp.vault_id = v.id AND uvp.shares > 0
+              ), 0) AS depositor_count,
+              GREATEST(0, (v.maturity_date::date - CURRENT_DATE)) AS days_until_maturity
+       FROM vaults v
+       WHERE v.state = 'Active'
+         AND v.maturity_date > NOW()
+         AND v.maturity_date <= NOW() + ($1::int * INTERVAL '1 day')
+       ORDER BY v.maturity_date ASC`,
+      [days],
+    );
+
+    return rows.map((row) => ({
+      ...mapVaultRow(row),
+      daysUntilMaturity: row.days_until_maturity,
+    }));
+  }
+
+  // ── Issue #645: Fully-funded vaults ─────────────────────────────────────────
+  async getFullyFundedVaults(): Promise<Vault[]> {
+    const rows = await query<VaultRow>(
+      `SELECT v.id, v.contract_id, v.factory_id, v.asset, v.name, v.symbol, v.state,
+              v.total_assets, v.total_supply, v.total_shares_ever_minted, v.total_shares_ever_burned,
+              v.created_at, v.updated_at,
+              v.funding_target, v.funding_deadline, v.min_deposit, v.max_deposit_per_user,
+              v.rwa_name, v.rwa_symbol, v.rwa_document_uri, v.rwa_category,
+              COALESCE((
+                SELECT COUNT(*)::int
+                FROM user_vault_positions uvp
+                WHERE uvp.vault_id = v.id AND uvp.shares > 0
+              ), 0) AS depositor_count
+       FROM vaults v
+       WHERE v.state = 'Funding'
+         AND v.funding_target IS NOT NULL
+         AND v.funding_target::numeric > 0
+         AND v.total_assets::numeric >= v.funding_target::numeric
+       ORDER BY (v.total_assets::numeric / v.funding_target::numeric) DESC`,
+    );
+
+    return rows.map(mapVaultRow);
+  }
+
+  // ── Issue #647: Similar vaults ───────────────────────────────────────────────
+  async getSimilarVaults(contractId: string): Promise<{
+    contractId: string;
+    name: string | null;
+    totalAssets: string;
+    rwaCategory: string | null;
+  }[] | null> {
+    const targetRows = await query<{
+      rwa_category: string | null;
+      total_assets: string;
+    }>(
+      "SELECT rwa_category, total_assets FROM vaults WHERE contract_id = $1",
+      [contractId],
+    );
+
+    if (targetRows.length === 0) return null;
+
+    const { rwa_category, total_assets } = targetRows[0];
+
+    if (!rwa_category) return [];
+
+    const rows = await query<{
+      contract_id: string;
+      name: string | null;
+      total_assets: string;
+      rwa_category: string | null;
+    }>(
+      `SELECT contract_id, name, total_assets, rwa_category
+       FROM vaults
+       WHERE rwa_category = $1
+         AND state = 'Active'
+         AND contract_id != $2
+       ORDER BY ABS(total_assets::numeric - $3::numeric) ASC
+       LIMIT 5`,
+      [rwa_category, contractId, total_assets],
+    );
+
+    return rows.map((r) => ({
+      contractId: r.contract_id,
+      name: r.name,
+      totalAssets: r.total_assets ?? "0",
+      rwaCategory: r.rwa_category,
+    }));
   }
 
   async getCompoundProjection(

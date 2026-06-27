@@ -44,7 +44,7 @@ export async function listVaults(req: Request, res: Response, next: NextFunction
       order: "asc" | "desc";
       q?: string;
     };
-    const result = await vaultService.listVaults({ page, pageSize, state, category, cursor, sort, order });
+    const result = await vaultService.listVaults({ page, pageSize, state, category, cursor, sort, order, q });
     setCacheHeaders(res);
     res.json(result);
   } catch (err) {
@@ -691,6 +691,7 @@ export async function searchVaults(req: Request, res: Response, next: NextFuncti
       pageSize,
       sort,
       order,
+      fuzzy,
     } = req.query as unknown as {
       q?: string;
       category?: string;
@@ -699,8 +700,9 @@ export async function searchVaults(req: Request, res: Response, next: NextFuncti
       pageSize: number;
       sort: "created_at" | "total_assets";
       order: "asc" | "desc";
+      fuzzy?: boolean;
     };
-    const result = await vaultService.searchVaults({ q, category, state, page, pageSize, sort, order });
+    const result = await vaultService.searchVaults({ q, category, state, page, pageSize, sort, order, fuzzy });
     setCacheHeaders(res);
     res.json(result);
   } catch (err) {
@@ -965,6 +967,72 @@ export async function getVaultTvlHistory(req: Request, res: Response, next: Next
 
     setCacheHeaders(res);
     res.json(data);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/vaults/maturing-soon?days=30
+ *
+ * Returns active vaults whose maturity_date falls within the next `days` days
+ * (1–90, default 30). Each entry includes a daysUntilMaturity integer.
+ *
+ * #644
+ */
+export async function getMaturingSoonVaults(req: Request, res: Response, next: NextFunction) {
+  try {
+    const daysParam = req.query["days"];
+    const days = typeof daysParam === "string" && /^\d+$/.test(daysParam)
+      ? Math.min(90, Math.max(1, parseInt(daysParam, 10)))
+      : 30;
+
+    const vaults = await vaultService.getMaturitySoonVaults(days);
+    setCacheHeaders(res);
+    res.json(vaults);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/vaults/fully-funded
+ *
+ * Returns Funding-state vaults where total_assets >= funding_target, ordered
+ * by funding ratio descending (most overfunded first). Each entry includes
+ * fundingProgress as a percentage.
+ *
+ * #645
+ */
+export async function getFullyFundedVaults(_req: Request, res: Response, next: NextFunction) {
+  try {
+    const vaults = await vaultService.getFullyFundedVaults();
+    setCacheHeaders(res);
+    res.json(vaults);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/vaults/:contractId/similar
+ *
+ * Returns up to 5 active vaults in the same rwa_category as the target vault,
+ * sorted by TVL proximity (closest total_assets first). Excludes the target
+ * vault itself. Returns [] when no similar vaults exist.
+ *
+ * #647
+ */
+export async function getSimilarVaults(req: Request, res: Response, next: NextFunction) {
+  try {
+    const contractId = String(req.params["contractId"]);
+    const similar = await vaultService.getSimilarVaults(contractId);
+    if (similar === null) {
+      res.status(404).json({ error: "NotFound", message: "Vault not found" });
+      return;
+    }
+    setCacheHeaders(res);
+    res.json(similar);
   } catch (err) {
     next(err);
   }
