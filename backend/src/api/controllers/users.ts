@@ -32,6 +32,22 @@ export async function getUserPortfolio(
   }
 }
 
+export async function getUserShareHistory(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const history = await userService.getShareBalanceHistory(
+      String(req.params["address"]),
+      typeof req.query["vaultId"] === "string" ? req.query["vaultId"] : undefined,
+    );
+    res.json(history);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getPortfoliosBatch(
   req: Request,
   res: Response,
@@ -79,6 +95,25 @@ export async function getUserYieldHistory(
     const pageSize = Number(req.query["pageSize"] ?? 20);
     const result = await userService.getUserYieldHistory(address, page, pageSize);
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getKycBatch(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { addresses, vaultId } = req.body as { addresses: string[]; vaultId: string };
+    const results = await Promise.all(
+      addresses.map(async (address) => {
+        try {
+          const verified = await readKycVerified(vaultId, address);
+          return [address, verified] as const;
+        } catch {
+          return [address, false] as const;
+        }
+      }),
+    );
+    res.json(Object.fromEntries(results));
   } catch (err) {
     next(err);
   }

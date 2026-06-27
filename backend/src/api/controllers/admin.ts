@@ -77,7 +77,7 @@ export async function backfillIndexer(req: Request, res: Response, next: NextFun
 
 export async function deleteApiKey(req: Request, res: Response, next: NextFunction) {
   try {
-    const keyId = req.params["id"];
+    const keyId = String(req.params["id"]);
     const idNum = parseInt(keyId, 10);
 
     if (isNaN(idNum) || idNum <= 0) {
@@ -95,6 +95,30 @@ export async function deleteApiKey(req: Request, res: Response, next: NextFuncti
     await query("DELETE FROM api_keys WHERE id = $1", [idNum]);
 
     res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getApiKeys(_req: Request, res: Response, next: NextFunction) {
+  try {
+    const rows = await query<{
+      id: number;
+      label: string | null;
+      role: string;
+      created_at: Date;
+    }>(
+      "SELECT id, label, role, created_at FROM api_keys ORDER BY created_at DESC",
+    );
+
+    res.json(
+      rows.map((row) => ({
+        id: row.id,
+        label: row.label,
+        role: row.role,
+        createdAt: row.created_at,
+      })),
+    );
   } catch (err) {
     next(err);
   }

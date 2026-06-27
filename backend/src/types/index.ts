@@ -15,12 +15,18 @@ export interface Vault {
   state: VaultState;
   totalAssets: string;
   totalSupply: string;
+  totalSharesEverMinted: string;
+  totalSharesEverBurned: string;
   depositorCount: number;
   fundingTarget: string | null;
   fundingDeadline: Date | null;
   fundingProgress: number | null;
   minDeposit: string | null;
   maxDepositPerUser: string | null;
+  rwaName: string | null;
+  rwaSymbol: string | null;
+  rwaDocumentUri: string | null;
+  rwaCategory: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -45,6 +51,21 @@ export interface UserVaultPosition {
   updatedAt: Date;
 }
 
+export interface VaultHolder {
+  userAddress: string;
+  shares: string;
+  deposited: string;
+  lastUpdatedAt: Date;
+}
+
+export type VaultHolderSort = "shares" | "deposited";
+
+export interface ShareBalanceHistoryEntry {
+  epoch: number;
+  shares: string;
+  recordedAt: Date;
+}
+
 export interface RedemptionRequest {
   id: number;
   vaultId: number;
@@ -58,6 +79,8 @@ export interface RedemptionRequest {
 export interface UserPortfolioResponse {
   positions: UserVaultPosition[];
   totalDeposited: string;
+  totalPendingYield: string;
+  totalValue: string;
 }
 
 export interface Epoch {
@@ -90,6 +113,7 @@ export interface PaginatedResponse<T> {
   total: number;
   page: number;
   pageSize: number;
+  nextCursor?: string | null;
 }
 
 export interface YieldHistoryEntry {
